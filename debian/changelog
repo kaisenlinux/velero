@@ -1,0 +1,5 @@
+velero (1.8.1-1kaisen) kaisen-packages; urgency=medium
+
+  * First packaging for Kaisen Linux
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Fri, 15 Apr 2022 15:10:25 +0200
