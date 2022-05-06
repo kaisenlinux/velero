@@ -1,3 +1,9 @@
+velero (1.8.1-2kaisen) kaisen-packages; urgency=medium
+
+  * Update the homepage link in the control file
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Fri, 06 May 2022 08:30:03 +0100
+
 velero (1.8.1-1kaisen) kaisen-packages; urgency=medium
 
   * First packaging for Kaisen Linux
