@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-FROM --platform=$BUILDPLATFORM golang:1.17.8 as builder-env
+FROM --platform=$BUILDPLATFORM golang:1.17.11 as builder-env
 
 ARG GOPROXY
 ARG PKG
@@ -50,8 +50,7 @@ RUN mkdir -p /output/usr/bin && \
     go build -o /output/${BIN} \
     -ldflags "${LDFLAGS}" ${PKG}/cmd/${BIN}
 
-# The digest for tag 'nonroot' at the time of the release
-FROM gcr.io/distroless/base-debian10@sha256:6dc8ca7c3bbdb1a00fd8f1229b1b8c88986a5818b830e3a42d4946982dbbf18b
+FROM gcr.io/distroless/base-debian11@sha256:e672eb713e56feb13e349773973b81b1b9284f70b15cf18d1a09ad31a03abe59
 
 LABEL maintainer="Nolan Brubaker <brubakern@vmware.com>"
 

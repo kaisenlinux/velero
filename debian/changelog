@@ -1,3 +1,9 @@
+velero (1.9.0-1kaisen) kaisen-packages; urgency=medium
+
+  * Import 1.9.0 version
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Fri, 08 Jul 2022 14:39:04 +0100
+
 velero (1.8.1-2kaisen) kaisen-packages; urgency=medium
 
   * Update the homepage link in the control file

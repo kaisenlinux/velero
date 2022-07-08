@@ -95,7 +95,7 @@ func NewCreateOptions() *CreateOptions {
 func (o *CreateOptions) BindFlags(flags *pflag.FlagSet) {
 	o.BackupOptions.BindFlags(flags)
 	flags.StringVar(&o.Schedule, "schedule", o.Schedule, "A cron expression specifying a recurring schedule for this backup to run")
-	flags.BoolVar(&o.UseOwnerReferencesInBackup, "use-owner-references-in-backup", o.UseOwnerReferencesInBackup, "Specifies whether to use OwnerReferences on backups created by this Schedule")
+	flags.BoolVar(&o.UseOwnerReferencesInBackup, "use-owner-references-in-backup", o.UseOwnerReferencesInBackup, "Specifies whether to use OwnerReferences on backups created by this Schedule. Notice: if set to true, when schedule is deleted, backups will be deleted too.")
 }
 
 func (o *CreateOptions) Validate(c *cobra.Command, args []string, f client.Factory) error {
@@ -111,9 +111,18 @@ func (o *CreateOptions) Complete(args []string, f client.Factory) error {
 }
 
 func (o *CreateOptions) Run(c *cobra.Command, f client.Factory) error {
+	var orders map[string]string
+
 	veleroClient, err := f.Client()
 	if err != nil {
 		return err
+	}
+
+	if len(o.BackupOptions.OrderedResources) > 0 {
+		orders, err = backup.ParseOrderedResources(o.BackupOptions.OrderedResources)
+		if err != nil {
+			return err
+		}
 	}
 
 	schedule := &api.Schedule{
@@ -135,6 +144,7 @@ func (o *CreateOptions) Run(c *cobra.Command, f client.Factory) error {
 				StorageLocation:         o.BackupOptions.StorageLocation,
 				VolumeSnapshotLocations: o.BackupOptions.SnapshotLocations,
 				DefaultVolumesToRestic:  o.BackupOptions.DefaultVolumesToRestic.Value,
+				OrderedResources:        orders,
 			},
 			Schedule:                   o.Schedule,
 			UseOwnerReferencesInBackup: &o.UseOwnerReferencesInBackup,

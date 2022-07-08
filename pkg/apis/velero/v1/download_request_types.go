@@ -1,5 +1,5 @@
 /*
-Copyright the Velero contributors.
+Copyright The Velero Contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -85,7 +85,6 @@ type DownloadRequestStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:object:generate=true
 // +kubebuilder:storageversion
-// +kubebuilder:subresource:status
 
 // DownloadRequest is a request to download an artifact from backup object storage, such as a backup
 // log file.

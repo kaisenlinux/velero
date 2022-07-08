@@ -36,9 +36,11 @@ type podTemplateConfig struct {
 	envVars                           []corev1.EnvVar
 	restoreOnly                       bool
 	annotations                       map[string]string
+	labels                            map[string]string
 	resources                         corev1.ResourceRequirements
 	withSecret                        bool
 	defaultResticMaintenanceFrequency time.Duration
+	garbageCollectionFrequency        time.Duration
 	plugins                           []string
 	features                          []string
 	defaultVolumesToRestic            bool
@@ -53,6 +55,12 @@ func WithImage(image string) podTemplateOption {
 func WithAnnotations(annotations map[string]string) podTemplateOption {
 	return func(c *podTemplateConfig) {
 		c.annotations = annotations
+	}
+}
+
+func WithLabels(labels map[string]string) podTemplateOption {
+	return func(c *podTemplateConfig) {
+		c.labels = labels
 	}
 }
 
@@ -94,6 +102,12 @@ func WithResources(resources corev1.ResourceRequirements) podTemplateOption {
 func WithDefaultResticMaintenanceFrequency(val time.Duration) podTemplateOption {
 	return func(c *podTemplateConfig) {
 		c.defaultResticMaintenanceFrequency = val
+	}
+}
+
+func WithGarbageCollectionFrequency(val time.Duration) podTemplateOption {
+	return func(c *podTemplateConfig) {
+		c.garbageCollectionFrequency = val
 	}
 }
 
@@ -141,9 +155,6 @@ func Deployment(namespace string, opts ...podTemplateOption) *appsv1.Deployment 
 		args = append(args, "--default-volumes-to-restic=true")
 	}
 
-	containerLabels := Labels()
-	containerLabels["deploy"] = "velero"
-
 	deployment := &appsv1.Deployment{
 		ObjectMeta: objectMeta(namespace, "velero"),
 		TypeMeta: metav1.TypeMeta{
@@ -154,7 +165,7 @@ func Deployment(namespace string, opts ...podTemplateOption) *appsv1.Deployment 
 			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"deploy": "velero"}},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels:      containerLabels,
+					Labels:      podLabels(c.labels, map[string]string{"deploy": "velero"}),
 					Annotations: podAnnotations(c.annotations),
 				},
 				Spec: corev1.PodSpec{
@@ -269,6 +280,10 @@ func Deployment(namespace string, opts ...podTemplateOption) *appsv1.Deployment 
 
 	if c.defaultResticMaintenanceFrequency > 0 {
 		deployment.Spec.Template.Spec.Containers[0].Args = append(deployment.Spec.Template.Spec.Containers[0].Args, fmt.Sprintf("--default-restic-prune-frequency=%v", c.defaultResticMaintenanceFrequency))
+	}
+
+	if c.garbageCollectionFrequency > 0 {
+		deployment.Spec.Template.Spec.Containers[0].Args = append(deployment.Spec.Template.Spec.Containers[0].Args, fmt.Sprintf("--garbage-collection-frequency=%v", c.garbageCollectionFrequency))
 	}
 
 	if len(c.plugins) > 0 {

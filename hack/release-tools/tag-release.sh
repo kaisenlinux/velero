@@ -38,6 +38,9 @@
 # This script is meant to be a combination of documentation and executable.
 # If you have questions at any point, please stop and ask!
 
+# Fail on any error.
+set -eo pipefail
+
 # Directory in which the script itself resides, so we can use it for calling programs that are in the same directory.
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 
@@ -135,8 +138,8 @@ if [[ -n $release_branch_name ]]; then
     remote_release_branch_name="$remote/$release_branch_name"
 
     # Determine whether the local and remote release branches already exist
-    local_branch=$(git branch | grep "$release_branch_name")
-    remote_branch=$(git branch -r | grep "$remote_release_branch_name")
+    local_branch=$(git branch | { grep "$release_branch_name" || true; })
+    remote_branch=$(git branch -r | { grep "$remote_release_branch_name" || true;})
     if [[ -z $remote_branch ]]; then
         echo "The branch $remote_release_branch_name must be created before you tag the release."
         exit 1

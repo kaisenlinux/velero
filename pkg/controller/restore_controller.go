@@ -1,5 +1,5 @@
 /*
-Copyright 2020 the Velero contributors.
+Copyright The Velero Contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -313,6 +313,11 @@ func (c *restoreController) validateAndComplete(restore *api.Restore, pluginMana
 		restore.Status.ValidationErrors = append(restore.Status.ValidationErrors, fmt.Sprintf("Invalid included/excluded namespace lists: %v", err))
 	}
 
+	// validate that only one exists orLabelSelector or just labelSelector (singular)
+	if restore.Spec.OrLabelSelectors != nil && restore.Spec.LabelSelector != nil {
+		restore.Status.ValidationErrors = append(restore.Status.ValidationErrors, fmt.Sprintf("encountered labelSelector as well as orLabelSelectors in restore spec, only one can be specified"))
+	}
+
 	// validate that exactly one of BackupName and ScheduleName have been specified
 	if !backupXorScheduleProvided(restore) {
 		restore.Status.ValidationErrors = append(restore.Status.ValidationErrors, "Either a backup or schedule must be specified as a source for the restore, but not both")
@@ -486,6 +491,30 @@ func (c *restoreController) runValidatedRestore(restore *api.Restore, info backu
 	}
 	restoreWarnings, restoreErrors := c.restorer.RestoreWithResolvers(restoreReq, actionsResolver, snapshotItemResolver,
 		c.snapshotLocationLister, pluginManager)
+
+	// log errors and warnings to the restore log
+	for _, msg := range restoreErrors.Velero {
+		restoreLog.Errorf("Velero restore error: %v", msg)
+	}
+	for _, msg := range restoreErrors.Cluster {
+		restoreLog.Errorf("Cluster resource restore error: %v", msg)
+	}
+	for ns, errs := range restoreErrors.Namespaces {
+		for _, msg := range errs {
+			restoreLog.Errorf("Namespace %v, resource restore error: %v", ns, msg)
+		}
+	}
+	for _, msg := range restoreWarnings.Velero {
+		restoreLog.Warnf("Velero restore warning: %v", msg)
+	}
+	for _, msg := range restoreWarnings.Cluster {
+		restoreLog.Warnf("Cluster resource restore warning: %v", msg)
+	}
+	for ns, errs := range restoreWarnings.Namespaces {
+		for _, msg := range errs {
+			restoreLog.Warnf("Namespace %v, resource restore warning: %v", ns, msg)
+		}
+	}
 	restoreLog.Info("restore completed")
 
 	// re-instantiate the backup store because credentials could have changed since the original

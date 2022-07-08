@@ -39,6 +39,7 @@ depends on your test patterns.
 */
 type VeleroBackupRestoreTest interface {
 	Init() error
+	StartRun() error
 	CreateResources() error
 	Backup() error
 	Destroy() error
@@ -71,19 +72,23 @@ var TestClientInstance TestClient
 
 func TestFunc(test VeleroBackupRestoreTest) func() {
 	return func() {
-		var err error
-		TestClientInstance, err = NewTestClient()
-		Expect(err).To(Succeed(), "Failed to instantiate cluster client for backup tests")
+		By("Create test client instance", func() {
+			var err error
+			TestClientInstance, err = NewTestClient()
+			Expect(err).NotTo(HaveOccurred(), "Failed to instantiate cluster client for backup tests")
+		})
 		Expect(test.Init()).To(Succeed(), "Failed to instantiate test cases")
 		BeforeEach(func() {
 			flag.Parse()
 			if VeleroCfg.InstallVelero {
-				Expect(VeleroInstall(context.Background(), &VeleroCfg, "", false)).To(Succeed())
+				Expect(VeleroInstall(context.Background(), &VeleroCfg, false)).To(Succeed())
 			}
 		})
 		AfterEach(func() {
 			if VeleroCfg.InstallVelero {
-				Expect(VeleroUninstall(context.Background(), VeleroCfg.VeleroCLI, VeleroCfg.VeleroNamespace)).To((Succeed()))
+				if !VeleroCfg.Debug {
+					Expect(VeleroUninstall(context.Background(), VeleroCfg.VeleroCLI, VeleroCfg.VeleroNamespace)).To((Succeed()))
+				}
 			}
 		})
 		It(test.GetTestMsg().Text, func() {
@@ -96,8 +101,11 @@ func TestFuncWithMultiIt(tests []VeleroBackupRestoreTest) func() {
 	return func() {
 		var err error
 		var countIt int
-		TestClientInstance, err = NewTestClient()
-		Expect(err).To(Succeed(), "Failed to instantiate cluster client for backup tests")
+		By("Create test client instance", func() {
+			TestClientInstance, err = NewTestClient()
+			Expect(err).NotTo(HaveOccurred(), "Failed to instantiate cluster client for backup tests")
+		})
+		//Expect(err).To(Succeed(), "Failed to instantiate cluster client for backup tests")
 		for k := range tests {
 			Expect(tests[k].Init()).To(Succeed(), fmt.Sprintf("Failed to instantiate test %s case", tests[k].GetTestMsg().Desc))
 		}
@@ -106,7 +114,7 @@ func TestFuncWithMultiIt(tests []VeleroBackupRestoreTest) func() {
 			flag.Parse()
 			if VeleroCfg.InstallVelero {
 				if countIt == 0 {
-					Expect(VeleroInstall(context.Background(), &VeleroCfg, "", false)).To(Succeed())
+					Expect(VeleroInstall(context.Background(), &VeleroCfg, false)).To(Succeed())
 				}
 				countIt++
 			}
@@ -114,7 +122,7 @@ func TestFuncWithMultiIt(tests []VeleroBackupRestoreTest) func() {
 
 		AfterEach(func() {
 			if VeleroCfg.InstallVelero {
-				if countIt == len(tests) {
+				if countIt == len(tests) && !VeleroCfg.Debug {
 					Expect(VeleroUninstall(context.Background(), VeleroCfg.VeleroCLI, VeleroCfg.VeleroNamespace)).To((Succeed()))
 				}
 			}
@@ -134,6 +142,10 @@ func (t *TestCase) Init() error {
 }
 
 func (t *TestCase) CreateResources() error {
+	return nil
+}
+
+func (t *TestCase) StartRun() error {
 	return nil
 }
 
@@ -180,8 +192,11 @@ func RunTestCase(test VeleroBackupRestoreTest) error {
 	}
 
 	defer test.Clean()
-
-	err := test.CreateResources()
+	err := test.StartRun()
+	if err != nil {
+		return err
+	}
+	err = test.CreateResources()
 	if err != nil {
 		return err
 	}

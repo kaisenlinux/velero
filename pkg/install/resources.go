@@ -48,6 +48,20 @@ func Labels() map[string]string {
 	}
 }
 
+func podLabels(userLabels ...map[string]string) map[string]string {
+	// Use the default labels as a starting point
+	base := Labels()
+
+	// Merge base labels with user labels to enforce CLI precedence
+	for _, labels := range userLabels {
+		for k, v := range labels {
+			base[k] = v
+		}
+	}
+
+	return base
+}
+
 func podAnnotations(userAnnotations map[string]string) map[string]string {
 	// Use the default annotations as a starting point
 	base := map[string]string{
@@ -201,6 +215,7 @@ type VeleroOptions struct {
 	Bucket                            string
 	Prefix                            string
 	PodAnnotations                    map[string]string
+	PodLabels                         map[string]string
 	ServiceAccountAnnotations         map[string]string
 	VeleroPodResources                corev1.ResourceRequirements
 	ResticPodResources                corev1.ResourceRequirements
@@ -211,6 +226,7 @@ type VeleroOptions struct {
 	BSLConfig                         map[string]string
 	VSLConfig                         map[string]string
 	DefaultResticMaintenanceFrequency time.Duration
+	GarbageCollectionFrequency        time.Duration
 	Plugins                           []string
 	NoDefaultBackupLocation           bool
 	CACertData                        []byte
@@ -265,10 +281,12 @@ func AllResources(o *VeleroOptions) *unstructured.UnstructuredList {
 
 	deployOpts := []podTemplateOption{
 		WithAnnotations(o.PodAnnotations),
+		WithLabels(o.PodLabels),
 		WithImage(o.Image),
 		WithResources(o.VeleroPodResources),
 		WithSecret(secretPresent),
 		WithDefaultResticMaintenanceFrequency(o.DefaultResticMaintenanceFrequency),
+		WithGarbageCollectionFrequency(o.GarbageCollectionFrequency),
 	}
 
 	if len(o.Features) > 0 {
@@ -294,6 +312,7 @@ func AllResources(o *VeleroOptions) *unstructured.UnstructuredList {
 	if o.UseRestic {
 		dsOpts := []podTemplateOption{
 			WithAnnotations(o.PodAnnotations),
+			WithLabels(o.PodLabels),
 			WithImage(o.Image),
 			WithResources(o.ResticPodResources),
 			WithSecret(secretPresent),
