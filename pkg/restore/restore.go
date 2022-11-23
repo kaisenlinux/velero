@@ -107,7 +107,7 @@ type kubernetesRestorer struct {
 	resticRestorerFactory      restic.RestorerFactory
 	resticTimeout              time.Duration
 	resourceTerminatingTimeout time.Duration
-	resourcePriorities         []string
+	resourcePriorities         Priorities
 	fileSystem                 filesystem.Interface
 	pvRenamer                  func(string) (string, error)
 	logger                     logrus.FieldLogger
@@ -120,7 +120,7 @@ func NewKubernetesRestorer(
 	restoreClient velerov1client.RestoresGetter,
 	discoveryHelper discovery.Helper,
 	dynamicFactory client.DynamicFactory,
-	resourcePriorities []string,
+	resourcePriorities Priorities,
 	namespaceClient corev1.NamespaceInterface,
 	resticRestorerFactory restic.RestorerFactory,
 	resticTimeout time.Duration,
@@ -351,7 +351,7 @@ type restoreContext struct {
 	renamedPVs                     map[string]string
 	pvRenamer                      func(string) (string, error)
 	discoveryHelper                discovery.Helper
-	resourcePriorities             []string
+	resourcePriorities             Priorities
 	hooksWaitGroup                 sync.WaitGroup
 	hooksErrs                      chan error
 	resourceRestoreHooks           []hook.ResourceRestoreHook
@@ -367,19 +367,31 @@ type resourceClientKey struct {
 
 // getOrderedResources returns an ordered list of resource identifiers to restore,
 // based on the provided resource priorities and backup contents. The returned list
-// begins with all of the prioritized resources (in order), and appends to that
-// an alphabetized list of all resources in the backup.
-func getOrderedResources(resourcePriorities []string, backupResources map[string]*archive.ResourceItems) []string {
-	// alphabetize resources in the backup
-	orderedBackupResources := make([]string, 0, len(backupResources))
+// begins with all of the high prioritized resources (in order), ends with all of
+// the low prioritized resources(in order), and an alphabetized list of resources
+// in the backup(pick out the prioritized resources) is put in the middle.
+func getOrderedResources(resourcePriorities Priorities, backupResources map[string]*archive.ResourceItems) []string {
+	priorities := map[string]struct{}{}
+	for _, priority := range resourcePriorities.HighPriorities {
+		priorities[priority] = struct{}{}
+	}
+	for _, priority := range resourcePriorities.LowPriorities {
+		priorities[priority] = struct{}{}
+	}
+
+	// pick the prioritized resources out
+	var orderedBackupResources []string
 	for resource := range backupResources {
+		if _, exist := priorities[resource]; exist {
+			continue
+		}
 		orderedBackupResources = append(orderedBackupResources, resource)
 	}
+	// alphabetize resources in the backup
 	sort.Strings(orderedBackupResources)
 
-	// Main list: everything in resource priorities, followed by what's in the
-	// backup (alphabetized).
-	return append(resourcePriorities, orderedBackupResources...)
+	list := append(resourcePriorities.HighPriorities, orderedBackupResources...)
+	return append(list, resourcePriorities.LowPriorities...)
 }
 
 type progressUpdate struct {
@@ -466,7 +478,7 @@ func (ctx *restoreContext) execute() (Result, Result) {
 		backupResources,
 		make([]restoreableResource, 0),
 		sets.NewString(),
-		[]string{"customresourcedefinitions"},
+		Priorities{HighPriorities: []string{"customresourcedefinitions"}},
 		false,
 	)
 	warnings.Merge(&w)
@@ -1017,7 +1029,7 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 
 			// Check to see if the claimRef.namespace field needs to be remapped,
 			// and do so if necessary.
-			_, err = remapClaimRefNS(ctx, obj)
+			err = remapClaimRefNS(ctx, obj)
 			if err != nil {
 				errs.Add(namespace, err)
 				return warnings, errs
@@ -1107,7 +1119,7 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 			ctx.log.Infof("Restoring persistent volume as-is because it doesn't have a snapshot and its reclaim policy is not Delete.")
 
 			// Check to see if the claimRef.namespace field needs to be remapped, and do so if necessary.
-			_, err = remapClaimRefNS(ctx, obj)
+			err = remapClaimRefNS(ctx, obj)
 			if err != nil {
 				errs.Add(namespace, err)
 				return warnings, errs
@@ -1249,12 +1261,31 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 		errs.Add(namespace, err)
 		return warnings, errs
 	}
-	if isAlreadyExistsError {
-		fromCluster, err := resourceClient.Get(name, metav1.GetOptions{})
-		if err != nil {
-			ctx.log.Infof("Error retrieving cluster version of %s: %v", kube.NamespaceAndName(obj), err)
-			warnings.Add(namespace, err)
-			return warnings, errs
+
+	// check if we want to treat the error as a warning, in some cases the creation call might not get executed due to object API validations
+	// and Velero might not get the already exists error type but in reality the object already exists
+	objectExists := false
+	var fromCluster *unstructured.Unstructured
+
+	if restoreErr != nil && !isAlreadyExistsError {
+		// check for the existence of the object in cluster, if no error then it implies that object exists
+		// and if err then we want to fallthrough and do another get call later
+		fromCluster, err = resourceClient.Get(name, metav1.GetOptions{})
+		if err == nil {
+			objectExists = true
+		}
+	}
+
+	if isAlreadyExistsError || objectExists {
+		// do a get call if we did not run this previously i.e.
+		// we've only run this for errors other than isAlreadyExistError
+		if fromCluster == nil {
+			fromCluster, err = resourceClient.Get(name, metav1.GetOptions{})
+			if err != nil {
+				ctx.log.Errorf("Error retrieving cluster version of %s: %v", kube.NamespaceAndName(obj), err)
+				errs.Add(namespace, err)
+				return warnings, errs
+			}
 		}
 		// Remove insubstantial metadata.
 		fromCluster, err = resetMetadataAndStatus(fromCluster)
@@ -1498,37 +1529,37 @@ func shouldRenamePV(ctx *restoreContext, obj *unstructured.Unstructured, client 
 // remapClaimRefNS remaps a PersistentVolume's claimRef.Namespace based on a
 // restore's NamespaceMappings, if necessary. Returns true if the namespace was
 // remapped, false if it was not required.
-func remapClaimRefNS(ctx *restoreContext, obj *unstructured.Unstructured) (bool, error) {
+func remapClaimRefNS(ctx *restoreContext, obj *unstructured.Unstructured) error {
 	if len(ctx.restore.Spec.NamespaceMapping) == 0 {
 		ctx.log.Debug("Persistent volume does not need to have the claimRef.namespace remapped because restore is not remapping any namespaces")
-		return false, nil
+		return nil
 	}
 
 	// Conversion to the real type here is more readable than all the error checking
 	// involved with reading each field individually.
 	pv := new(v1.PersistentVolume)
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, pv); err != nil {
-		return false, errors.Wrapf(err, "error converting persistent volume to structured")
+		return errors.Wrapf(err, "error converting persistent volume to structured")
 	}
 
 	if pv.Spec.ClaimRef == nil {
 		ctx.log.Debugf("Persistent volume does not need to have the claimRef.namespace remapped because it's not claimed")
-		return false, nil
+		return nil
 	}
 
 	targetNS, ok := ctx.restore.Spec.NamespaceMapping[pv.Spec.ClaimRef.Namespace]
 
 	if !ok {
 		ctx.log.Debugf("Persistent volume does not need to have the claimRef.namespace remapped because it's not claimed by a PVC in a namespace that's being remapped")
-		return false, nil
+		return nil
 	}
 
 	err := unstructured.SetNestedField(obj.Object, targetNS, "spec", "claimRef", "namespace")
 	if err != nil {
-		return false, err
+		return err
 	}
 	ctx.log.Debug("Persistent volume's namespace was updated")
-	return true, nil
+	return nil
 }
 
 // restorePodVolumeBackups restores the PodVolumeBackups for the given restored pod
@@ -1771,7 +1802,7 @@ func (ctx *restoreContext) getOrderedResourceCollection(
 	backupResources map[string]*archive.ResourceItems,
 	restoreResourceCollection []restoreableResource,
 	processedResources sets.String,
-	resourcePriorities []string,
+	resourcePriorities Priorities,
 	includeAllResources bool,
 ) ([]restoreableResource, sets.String, Result, Result) {
 	var warnings, errs Result
@@ -1793,7 +1824,7 @@ func (ctx *restoreContext) getOrderedResourceCollection(
 	if includeAllResources {
 		resourceList = getOrderedResources(resourcePriorities, backupResources)
 	} else {
-		resourceList = resourcePriorities
+		resourceList = resourcePriorities.HighPriorities
 	}
 	for _, resource := range resourceList {
 		// try to resolve the resource via discovery to a complete group/version/resource
@@ -2024,7 +2055,7 @@ func (ctx *restoreContext) processUpdateResourcePolicy(fromCluster, fromClusterW
 	// try patching the in-cluster resource (resource diff plus latest backup/restore labels)
 	_, err = resourceClient.Patch(obj.GetName(), patchBytes)
 	if err != nil {
-		ctx.log.Errorf("patch attempt failed for %s %s: %v", fromCluster.GroupVersionKind(), kube.NamespaceAndName(fromCluster), err)
+		ctx.log.Warnf("patch attempt failed for %s %s: %v", fromCluster.GroupVersionKind(), kube.NamespaceAndName(fromCluster), err)
 		warnings.Add(namespace, err)
 		// try just patching the labels
 		warningsFromUpdate, errsFromUpdate := ctx.updateBackupRestoreLabels(fromCluster, fromClusterWithLabels, namespace, resourceClient)

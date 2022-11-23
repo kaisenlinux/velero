@@ -2,7 +2,7 @@ Source: velero
 Section: admin
 Priority: optional
 Maintainer: Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>
-Build-Depends: debhelper-compat (= 13), golang-go (>= 1.17), dh-golang,
+Build-Depends: debhelper-compat (= 13), golang-go (>= 1.18), dh-golang,
 Standards-Version: 4.6.0
 Homepage: https://velero.io/
 Vcs-Browser: https://gitlab.com/kaisenlinux/packages/velero
@@ -12,5 +12,5 @@ XS-Go-Import-Path: github.com/vmware-tanzu/velero
 
 Package: velero
 Architecture: amd64 arm64
-Depends: ${shlibs:Depends}, ${misc:Depends}, golang-go (>= 1.17),
+Depends: ${shlibs:Depends}, ${misc:Depends}, golang-go (>= 1.18),
 Description: Backup and migrate Kubernetes applications and their persistent volumes

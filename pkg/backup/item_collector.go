@@ -151,7 +151,7 @@ func sortResourcesByOrder(log logrus.FieldLogger, items []*kubernetesResource, o
 }
 
 // getOrderedResourcesForType gets order of resourceType from orderResources.
-func getOrderedResourcesForType(log logrus.FieldLogger, orderedResources map[string]string, resourceType string) []string {
+func getOrderedResourcesForType(orderedResources map[string]string, resourceType string) []string {
 	if orderedResources == nil {
 		return nil
 	}
@@ -175,7 +175,7 @@ func (r *itemCollector) getResourceItems(log logrus.FieldLogger, gv schema.Group
 		clusterScoped = !resource.Namespaced
 	)
 
-	orders := getOrderedResourcesForType(log, r.backupRequest.Backup.Spec.OrderedResources, resource.Name)
+	orders := getOrderedResourcesForType(r.backupRequest.Backup.Spec.OrderedResources, resource.Name)
 	// Getting the preferred group version of this resource
 	preferredGVR, _, err := r.discoveryHelper.ResourceFor(gr.WithVersion(""))
 	if err != nil {
@@ -225,8 +225,11 @@ func (r *itemCollector) getResourceItems(log logrus.FieldLogger, gv schema.Group
 
 	namespacesToList := getNamespacesToList(r.backupRequest.NamespaceIncludesExcludes)
 
-	// Check if we're backing up namespaces, and only certain ones
-	if gr == kuberesource.Namespaces && namespacesToList[0] != "" {
+	// Check if we're backing up namespaces for a less-than-full backup.
+	// We enter this block if resource is Namespaces and the namespae list is either empty or contains
+	// an explicit namespace list. (We skip this block if the list contains "" since that indicates
+	// a full-cluster backup
+	if gr == kuberesource.Namespaces && (len(namespacesToList) == 0 || namespacesToList[0] != "") {
 		resourceClient, err := r.dynamicFactory.ClientForGroupVersionResource(gv, resource, "")
 		if err != nil {
 			log.WithError(err).Error("Error getting dynamic client")

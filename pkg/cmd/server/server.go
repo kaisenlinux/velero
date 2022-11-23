@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bombsimon/logrusr"
+	logrusr "github.com/bombsimon/logrusr/v3"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
@@ -114,7 +114,7 @@ type serverConfig struct {
 	pluginDir, metricsAddress, defaultBackupLocation                        string
 	backupSyncPeriod, podVolumeOperationTimeout, resourceTerminatingTimeout time.Duration
 	defaultBackupTTL, storeValidationFrequency, defaultCSISnapshotTimeout   time.Duration
-	restoreResourcePriorities                                               []string
+	restoreResourcePriorities                                               restore.Priorities
 	defaultVolumeSnapshotLocations                                          map[string]string
 	restoreOnly                                                             bool
 	disabledControllers                                                     []string
@@ -208,7 +208,7 @@ func NewCommand(f client.Factory) *cobra.Command {
 	command.Flags().DurationVar(&config.podVolumeOperationTimeout, "restic-timeout", config.podVolumeOperationTimeout, "How long backups/restores of pod volumes should be allowed to run before timing out.")
 	command.Flags().BoolVar(&config.restoreOnly, "restore-only", config.restoreOnly, "Run in a mode where only restores are allowed; backups, schedules, and garbage-collection are all disabled. DEPRECATED: this flag will be removed in v2.0. Use read-only backup storage locations instead.")
 	command.Flags().StringSliceVar(&config.disabledControllers, "disable-controllers", config.disabledControllers, fmt.Sprintf("List of controllers to disable on startup. Valid values are %s", strings.Join(controller.DisableableControllers, ",")))
-	command.Flags().StringSliceVar(&config.restoreResourcePriorities, "restore-resource-priorities", config.restoreResourcePriorities, "Desired order of resource restores; any resource not in the list will be restored alphabetically after the prioritized resources.")
+	command.Flags().Var(&config.restoreResourcePriorities, "restore-resource-priorities", "Desired order of resource restores, the priority list contains two parts which are split by \"-\" element. The resources before \"-\" element are restored first as high priorities, the resources after \"-\" element are restored last as low priorities, and any resource not in the list will be restored alphabetically between the high and low priorities.")
 	command.Flags().StringVar(&config.defaultBackupLocation, "default-backup-storage-location", config.defaultBackupLocation, "Name of the default backup storage location. DEPRECATED: this flag will be removed in v2.0. Use \"velero backup-location set --default\" instead.")
 	command.Flags().DurationVar(&config.storeValidationFrequency, "store-validation-frequency", config.storeValidationFrequency, "How often to verify if the storage is valid. Optional. Set this to `0s` to disable sync. Default 1 minute.")
 	command.Flags().Var(&volumeSnapshotLocations, "default-volume-snapshot-locations", "List of unique volume providers and default volume snapshot location (provider1:location-01,provider2:location-02,...)")
@@ -310,7 +310,7 @@ func newServer(f client.Factory, config serverConfig, logger *logrus.Logger) (*s
 	corev1api.AddToScheme(scheme)
 	snapshotv1api.AddToScheme(scheme)
 
-	ctrl.SetLogger(logrusr.NewLogger(logger))
+	ctrl.SetLogger(logrusr.New(logger))
 
 	mgr, err := ctrl.NewManager(clientConfig, ctrl.Options{
 		Scheme:    scheme,
@@ -467,6 +467,7 @@ func (s *server) veleroResourcesExist() error {
 	return nil
 }
 
+// High priorities:
 // - Custom Resource Definitions come before Custom Resource so that they can be
 //   restored with their corresponding CRD.
 // - Namespaces go second because all namespaced resources depend on them.
@@ -489,28 +490,36 @@ func (s *server) veleroResourcesExist() error {
 // - CAPI Clusters come before ClusterResourceSets because failing to do so means the CAPI controller-manager will panic.
 //	 Both Clusters and ClusterResourceSets need to come before ClusterResourceSetBinding in order to properly restore workload clusters.
 //   See https://github.com/kubernetes-sigs/cluster-api/issues/4105
-var defaultRestorePriorities = []string{
-	"customresourcedefinitions",
-	"namespaces",
-	"storageclasses",
-	"volumesnapshotclass.snapshot.storage.k8s.io",
-	"volumesnapshotcontents.snapshot.storage.k8s.io",
-	"volumesnapshots.snapshot.storage.k8s.io",
-	"persistentvolumes",
-	"persistentvolumeclaims",
-	"secrets",
-	"configmaps",
-	"serviceaccounts",
-	"limitranges",
-	"pods",
-	// we fully qualify replicasets.apps because prior to Kubernetes 1.16, replicasets also
-	// existed in the extensions API group, but we back up replicasets from "apps" so we want
-	// to ensure that we prioritize restoring from "apps" too, since this is how they're stored
-	// in the backup.
-	"replicasets.apps",
-	"clusterclasses.cluster.x-k8s.io",
-	"clusters.cluster.x-k8s.io",
-	"clusterresourcesets.addons.cluster.x-k8s.io",
+//
+// Low priorities:
+// - Tanzu ClusterBootstrap go last as it can reference any other kind of resources
+var defaultRestorePriorities = restore.Priorities{
+	HighPriorities: []string{
+		"customresourcedefinitions",
+		"namespaces",
+		"storageclasses",
+		"volumesnapshotclass.snapshot.storage.k8s.io",
+		"volumesnapshotcontents.snapshot.storage.k8s.io",
+		"volumesnapshots.snapshot.storage.k8s.io",
+		"persistentvolumes",
+		"persistentvolumeclaims",
+		"secrets",
+		"configmaps",
+		"serviceaccounts",
+		"limitranges",
+		"pods",
+		// we fully qualify replicasets.apps because prior to Kubernetes 1.16, replicasets also
+		// existed in the extensions API group, but we back up replicasets from "apps" so we want
+		// to ensure that we prioritize restoring from "apps" too, since this is how they're stored
+		// in the backup.
+		"replicasets.apps",
+		"clusterclasses.cluster.x-k8s.io",
+		"clusters.cluster.x-k8s.io",
+		"clusterresourcesets.addons.cluster.x-k8s.io",
+	},
+	LowPriorities: []string{
+		"clusterbootstraps.run.tanzu.vmware.com",
+	},
 }
 
 func (s *server) initRestic() error {
@@ -585,7 +594,7 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 		metricsMux := http.NewServeMux()
 		metricsMux.Handle("/metrics", promhttp.Handler())
 		s.logger.Infof("Starting metric server at address [%s]", s.metricsAddress)
-		if err := http.ListenAndServe(s.metricsAddress, metricsMux); err != nil {
+		if err := http.ListenAndServe(s.metricsAddress, metricsMux); err != nil { //nolint:gosec
 			s.logger.Fatalf("Failed to start metric server at [%s]: %v", s.metricsAddress, err)
 		}
 	}()
@@ -602,7 +611,7 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 
 	csiVSLister, csiVSCLister, csiVSClassLister := s.getCSISnapshotListers()
 
-	backupSyncControllerRunInfo := func() controllerRunInfo {
+	backupSyncControllerRunInfo := func() controllerRunInfo { //nolint:typecheck
 		backupSyncContoller := controller.NewBackupSyncController(
 			s.veleroClient.VeleroV1(),
 			s.mgr.GetClient(),
@@ -627,7 +636,7 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 
 	backupTracker := controller.NewBackupTracker()
 
-	backupControllerRunInfo := func() controllerRunInfo {
+	backupControllerRunInfo := func() controllerRunInfo { //nolint:typecheck
 		backupper, err := backup.NewKubernetesBackupper(
 			s.veleroClient.VeleroV1(),
 			s.discoveryHelper,
@@ -671,7 +680,7 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 		}
 	}
 
-	gcControllerRunInfo := func() controllerRunInfo {
+	gcControllerRunInfo := func() controllerRunInfo { //nolint:typecheck
 		gcController := controller.NewGCController(
 			s.logger,
 			s.sharedInformerFactory.Velero().V1().Backups(),
@@ -687,7 +696,7 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 		}
 	}
 
-	restoreControllerRunInfo := func() controllerRunInfo {
+	restoreControllerRunInfo := func() controllerRunInfo { //nolint:typecheck
 		restorer, err := restore.NewKubernetesRestorer(
 			s.veleroClient.VeleroV1(),
 			s.discoveryHelper,
@@ -897,7 +906,7 @@ func (s *server) runProfiler() {
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
-	if err := http.ListenAndServe(s.config.profilerAddress, mux); err != nil {
+	if err := http.ListenAndServe(s.config.profilerAddress, mux); err != nil { //nolint:gosec
 		s.logger.WithError(errors.WithStack(err)).Error("error running profiler http server")
 	}
 }
@@ -955,7 +964,7 @@ func markInProgressBackupsFailed(ctx context.Context, client ctrlclient.Client, 
 		return
 	}
 
-	for _, backup := range backups.Items {
+	for i, backup := range backups.Items {
 		if backup.Status.Phase != velerov1api.BackupPhaseInProgress {
 			log.Debugf("the status of backup %q is %q, skip", backup.GetName(), backup.Status.Phase)
 			continue
@@ -964,7 +973,7 @@ func markInProgressBackupsFailed(ctx context.Context, client ctrlclient.Client, 
 		updated.Status.Phase = velerov1api.BackupPhaseFailed
 		updated.Status.FailureReason = fmt.Sprintf("get a backup with status %q during the server starting, mark it as %q", velerov1api.BackupPhaseInProgress, updated.Status.Phase)
 		updated.Status.CompletionTimestamp = &metav1.Time{Time: time.Now()}
-		if err := client.Patch(ctx, updated, ctrlclient.MergeFrom(&backup)); err != nil {
+		if err := client.Patch(ctx, updated, ctrlclient.MergeFrom(&backups.Items[i])); err != nil {
 			log.WithError(errors.WithStack(err)).Errorf("failed to patch backup %q", backup.GetName())
 			continue
 		}
@@ -978,7 +987,7 @@ func markInProgressRestoresFailed(ctx context.Context, client ctrlclient.Client,
 		log.WithError(errors.WithStack(err)).Error("failed to list restores")
 		return
 	}
-	for _, restore := range restores.Items {
+	for i, restore := range restores.Items {
 		if restore.Status.Phase != velerov1api.RestorePhaseInProgress {
 			log.Debugf("the status of restore %q is %q, skip", restore.GetName(), restore.Status.Phase)
 			continue
@@ -987,7 +996,7 @@ func markInProgressRestoresFailed(ctx context.Context, client ctrlclient.Client,
 		updated.Status.Phase = velerov1api.RestorePhaseFailed
 		updated.Status.FailureReason = fmt.Sprintf("get a restore with status %q during the server starting, mark it as %q", velerov1api.RestorePhaseInProgress, updated.Status.Phase)
 		updated.Status.CompletionTimestamp = &metav1.Time{Time: time.Now()}
-		if err := client.Patch(ctx, updated, ctrlclient.MergeFrom(&restore)); err != nil {
+		if err := client.Patch(ctx, updated, ctrlclient.MergeFrom(&restores.Items[i])); err != nil {
 			log.WithError(errors.WithStack(err)).Errorf("failed to patch restore %q", restore.GetName())
 			continue
 		}

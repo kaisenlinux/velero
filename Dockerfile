@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-FROM --platform=$BUILDPLATFORM golang:1.17.11 as builder-env
+FROM --platform=$BUILDPLATFORM golang:1.18.8 as builder-env
 
 ARG GOPROXY
 ARG PKG
@@ -29,8 +29,6 @@ WORKDIR /go/src/github.com/vmware-tanzu/velero
 
 COPY . /go/src/github.com/vmware-tanzu/velero
 
-RUN apt-get update && apt-get install -y bzip2
-
 FROM --platform=$BUILDPLATFORM builder-env as builder
 
 ARG TARGETOS
@@ -45,12 +43,12 @@ ENV GOOS=${TARGETOS} \
     GOARM=${TARGETVARIANT}
 
 RUN mkdir -p /output/usr/bin && \
-    bash ./hack/download-restic.sh && \
     export GOARM=$( echo "${GOARM}" | cut -c2-) && \
+    bash ./hack/build-restic.sh && \
     go build -o /output/${BIN} \
     -ldflags "${LDFLAGS}" ${PKG}/cmd/${BIN}
 
-FROM gcr.io/distroless/base-debian11@sha256:49d2923f35d66b8402487a7c01bc62a66d8279cd42e89c11b64cdce8d5826c03
+FROM gcr.io/distroless/base-debian11@sha256:99133cb0878bb1f84d1753957c6fd4b84f006f2798535de22ebf7ba170bbf434
 
 LABEL maintainer="Nolan Brubaker <brubakern@vmware.com>"
 

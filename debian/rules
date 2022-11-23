@@ -1,15 +1,18 @@
 #!/usr/bin/make -f
 
-export GOPATH=$(CURDIR)/obj-x86_64-linux-gnu
-export GOBIN=$(CURDIR)/obj-x86_64-linux-gnu/bin
+export GOPATH=$(CURDIR)/_build
+export GOBIN=$(CURDIR)/_build/bin
 
 %:
 	dh $@ --buildsystem=golang
 
+override_dh_auto_clean:
+	rm -rf $(CURDIR)/_build
+
 override_dh_auto_build:
 	go build $(CURDIR)/cmd/velero
-	$(CURDIR)/velero completion bash > obj-x86_64-linux-gnu/velero
-	$(CURDIR)/velero completion zsh > obj-x86_64-linux-gnu/_velero
+	$(CURDIR)/velero completion bash > $(CURDIR)/_build/velero
+	$(CURDIR)/velero completion zsh > $(CURDIR)/_build/_velero
 
 override_dh_auto_test:
 	$(CURDIR)/velero --help
