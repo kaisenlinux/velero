@@ -43,8 +43,8 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/discovery"
 	"github.com/vmware-tanzu/velero/pkg/features"
 	"github.com/vmware-tanzu/velero/pkg/kuberesource"
-	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
-	"github.com/vmware-tanzu/velero/pkg/restic"
+	vsv1 "github.com/vmware-tanzu/velero/pkg/plugin/velero/volumesnapshotter/v1"
+	"github.com/vmware-tanzu/velero/pkg/podvolume"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	"github.com/vmware-tanzu/velero/pkg/volume"
 )
@@ -56,16 +56,16 @@ const (
 
 // itemBackupper can back up individual items to a tar writer.
 type itemBackupper struct {
-	backupRequest           *Request
-	tarWriter               tarWriter
-	dynamicFactory          client.DynamicFactory
-	discoveryHelper         discovery.Helper
-	resticBackupper         restic.Backupper
-	resticSnapshotTracker   *pvcSnapshotTracker
-	volumeSnapshotterGetter VolumeSnapshotterGetter
+	backupRequest            *Request
+	tarWriter                tarWriter
+	dynamicFactory           client.DynamicFactory
+	discoveryHelper          discovery.Helper
+	podVolumeBackupper       podvolume.Backupper
+	podVolumeSnapshotTracker *pvcSnapshotTracker
+	volumeSnapshotterGetter  VolumeSnapshotterGetter
 
 	itemHookHandler                    hook.ItemHookHandler
-	snapshotLocationVolumeSnapshotters map[string]velero.VolumeSnapshotter
+	snapshotLocationVolumeSnapshotters map[string]vsv1.VolumeSnapshotter
 }
 
 // backupItem backs up an individual item to tarWriter. The item may be excluded based on the
@@ -92,7 +92,6 @@ func (ib *itemBackupper) backupItem(logger logrus.FieldLogger, obj runtime.Unstr
 			log.Infof("Excluding item because it has label %s=true", excludeFromBackupLabel)
 			return false, nil
 		}
-
 		// NOTE: we have to re-check namespace & resource includes/excludes because it's possible that
 		// backupItem can be invoked by a custom action.
 		if namespace != "" && !ib.backupRequest.NamespaceIncludesExcludes.ShouldInclude(namespace) {
@@ -138,9 +137,9 @@ func (ib *itemBackupper) backupItem(logger logrus.FieldLogger, obj runtime.Unstr
 	}
 
 	var (
-		backupErrs            []error
-		pod                   *corev1api.Pod
-		resticVolumesToBackup []string
+		backupErrs []error
+		pod        *corev1api.Pod
+		pvbVolumes []string
 	)
 
 	if groupResource == kuberesource.Pods {
@@ -151,25 +150,25 @@ func (ib *itemBackupper) backupItem(logger logrus.FieldLogger, obj runtime.Unstr
 			// nil it on error since it's not valid
 			pod = nil
 		} else {
-			// Get the list of volumes to back up using restic from the pod's annotations. Remove from this list
+			// Get the list of volumes to back up using pod volume backup from the pod's annotations. Remove from this list
 			// any volumes that use a PVC that we've already backed up (this would be in a read-write-many scenario,
 			// where it's been backed up from another pod), since we don't need >1 backup per PVC.
-			for _, volume := range restic.GetPodVolumesUsingRestic(pod, boolptr.IsSetToTrue(ib.backupRequest.Spec.DefaultVolumesToRestic)) {
-				if found, pvcName := ib.resticSnapshotTracker.HasPVCForPodVolume(pod, volume); found {
+			for _, volume := range podvolume.GetVolumesByPod(pod, boolptr.IsSetToTrue(ib.backupRequest.Spec.DefaultVolumesToFsBackup)) {
+				if found, pvcName := ib.podVolumeSnapshotTracker.HasPVCForPodVolume(pod, volume); found {
 					log.WithFields(map[string]interface{}{
 						"podVolume": volume,
 						"pvcName":   pvcName,
-					}).Info("Pod volume uses a persistent volume claim which has already been backed up with restic from another pod, skipping.")
+					}).Info("Pod volume uses a persistent volume claim which has already been backed up from another pod, skipping.")
 					continue
 				}
 
-				resticVolumesToBackup = append(resticVolumesToBackup, volume)
+				pvbVolumes = append(pvbVolumes, volume)
 			}
 
 			// track the volumes that are PVCs using the PVC snapshot tracker, so that when we backup PVCs/PVs
 			// via an item action in the next step, we don't snapshot PVs that will have their data backed up
-			// with restic.
-			ib.resticSnapshotTracker.Track(pod, resticVolumesToBackup)
+			// with pod volume backup.
+			ib.podVolumeSnapshotTracker.Track(pod, pvbVolumes)
 		}
 	}
 
@@ -208,7 +207,7 @@ func (ib *itemBackupper) backupItem(logger logrus.FieldLogger, obj runtime.Unstr
 	if groupResource == kuberesource.Pods && pod != nil {
 		// this function will return partial results, so process podVolumeBackups
 		// even if there are errors.
-		podVolumeBackups, errs := ib.backupPodVolumes(log, pod, resticVolumesToBackup)
+		podVolumeBackups, errs := ib.backupPodVolumes(log, pod, pvbVolumes)
 
 		ib.backupRequest.PodVolumeBackups = append(ib.backupRequest.PodVolumeBackups, podVolumeBackups...)
 		backupErrs = append(backupErrs, errs...)
@@ -293,19 +292,19 @@ func (ib *itemBackupper) backupItem(logger logrus.FieldLogger, obj runtime.Unstr
 	return true, nil
 }
 
-// backupPodVolumes triggers restic backups of the specified pod volumes, and returns a list of PodVolumeBackups
+// backupPodVolumes triggers pod volume backups of the specified pod volumes, and returns a list of PodVolumeBackups
 // for volumes that were successfully backed up, and a slice of any errors that were encountered.
 func (ib *itemBackupper) backupPodVolumes(log logrus.FieldLogger, pod *corev1api.Pod, volumes []string) ([]*velerov1api.PodVolumeBackup, []error) {
 	if len(volumes) == 0 {
 		return nil, nil
 	}
 
-	if ib.resticBackupper == nil {
-		log.Warn("No restic backupper, not backing up pod's volumes")
+	if ib.podVolumeBackupper == nil {
+		log.Warn("No pod volume backupper, not backing up pod's volumes")
 		return nil, nil
 	}
 
-	return ib.resticBackupper.BackupPodVolumes(ib.backupRequest.Backup, pod, volumes, log)
+	return ib.podVolumeBackupper.BackupPodVolumes(ib.backupRequest.Backup, pod, volumes, log)
 }
 
 func (ib *itemBackupper) executeActions(
@@ -369,7 +368,7 @@ func (ib *itemBackupper) executeActions(
 
 // volumeSnapshotter instantiates and initializes a VolumeSnapshotter given a VolumeSnapshotLocation,
 // or returns an existing one if one's already been initialized for the location.
-func (ib *itemBackupper) volumeSnapshotter(snapshotLocation *velerov1api.VolumeSnapshotLocation) (velero.VolumeSnapshotter, error) {
+func (ib *itemBackupper) volumeSnapshotter(snapshotLocation *velerov1api.VolumeSnapshotLocation) (vsv1.VolumeSnapshotter, error) {
 	if bs, ok := ib.snapshotLocationVolumeSnapshotters[snapshotLocation.Name]; ok {
 		return bs, nil
 	}
@@ -384,7 +383,7 @@ func (ib *itemBackupper) volumeSnapshotter(snapshotLocation *velerov1api.VolumeS
 	}
 
 	if ib.snapshotLocationVolumeSnapshotters == nil {
-		ib.snapshotLocationVolumeSnapshotters = make(map[string]velero.VolumeSnapshotter)
+		ib.snapshotLocationVolumeSnapshotters = make(map[string]vsv1.VolumeSnapshotter)
 	}
 	ib.snapshotLocationVolumeSnapshotters[snapshotLocation.Name] = bs
 
@@ -424,11 +423,11 @@ func (ib *itemBackupper) takePVSnapshot(obj runtime.Unstructured, log logrus.Fie
 
 	log = log.WithField("persistentVolume", pv.Name)
 
-	// If this PV is claimed, see if we've already taken a (restic) snapshot of the contents
+	// If this PV is claimed, see if we've already taken a (pod volume backup) snapshot of the contents
 	// of this PV. If so, don't take a snapshot.
 	if pv.Spec.ClaimRef != nil {
-		if ib.resticSnapshotTracker.Has(pv.Spec.ClaimRef.Namespace, pv.Spec.ClaimRef.Name) {
-			log.Info("Skipping snapshot of persistent volume because volume is being backed up with restic.")
+		if ib.podVolumeSnapshotTracker.Has(pv.Spec.ClaimRef.Namespace, pv.Spec.ClaimRef.Name) {
+			log.Info("Skipping snapshot of persistent volume because volume is being backed up with pod volume backup.")
 			return nil
 		}
 	}
@@ -459,7 +458,7 @@ func (ib *itemBackupper) takePVSnapshot(obj runtime.Unstructured, log logrus.Fie
 
 	var (
 		volumeID, location string
-		volumeSnapshotter  velero.VolumeSnapshotter
+		volumeSnapshotter  vsv1.VolumeSnapshotter
 	)
 
 	for _, snapshotLocation := range ib.backupRequest.SnapshotLocations {

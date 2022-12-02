@@ -112,17 +112,17 @@ GOPROXY ?= https://proxy.golang.org
 # If you want to build all containers, see the 'all-containers' rule.
 all:
 	@$(MAKE) build
-	@$(MAKE) build BIN=velero-restic-restore-helper
+	@$(MAKE) build BIN=velero-restore-helper
 
 build-%:
 	@$(MAKE) --no-print-directory ARCH=$* build
-	@$(MAKE) --no-print-directory ARCH=$* build BIN=velero-restic-restore-helper
+	@$(MAKE) --no-print-directory ARCH=$* build BIN=velero-restore-helper
 
 all-build: $(addprefix build-, $(CLI_PLATFORMS))
 
 all-containers: container-builder-env
 	@$(MAKE) --no-print-directory container
-	@$(MAKE) --no-print-directory container BIN=velero-restic-restore-helper
+	@$(MAKE) --no-print-directory container BIN=velero-restore-helper
 
 local: build-dirs
 # Add DEBUG=1 to enable debug locally
@@ -163,6 +163,7 @@ shell: build-dirs build-env
 	@# under $GOPATH).
 	@docker run \
 		-e GOFLAGS \
+		-e GOPROXY \
 		-i $(TTY) \
 		--rm \
 		-u $$(id -u):$$(id -g) \
@@ -208,6 +209,12 @@ endif
 	--build-arg=RESTIC_VERSION=$(RESTIC_VERSION) \
 	-f $(VELERO_DOCKERFILE) .
 	@echo "container: $(IMAGE):$(VERSION)"
+ifeq ($(BUILDX_OUTPUT_TYPE)_$(REGISTRY), registry_velero)
+	docker pull $(IMAGE):$(VERSION)
+	rm -f $(BIN)-$(VERSION).tar
+	docker save $(IMAGE):$(VERSION) -o $(BIN)-$(VERSION).tar
+	gzip -f $(BIN)-$(VERSION).tar
+endif
 
 SKIP_TESTS ?=
 test: build-dirs

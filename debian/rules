@@ -8,6 +8,7 @@ export GOBIN=$(CURDIR)/_build/bin
 
 override_dh_auto_clean:
 	rm -rf $(CURDIR)/_build
+	rm -rf $(CURDIR)/obj-x86_64-linux-gnu
 
 override_dh_auto_build:
 	go build $(CURDIR)/cmd/velero

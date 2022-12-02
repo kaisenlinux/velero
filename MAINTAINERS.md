@@ -13,6 +13,7 @@
 | Xun Jiang | [blackpiglet](https://github.com/blackpiglet) | [VMware](https://www.github.com/vmware/) |
 | Ming Qiu | [qiuming-best](https://github.com/qiuming-best) | [VMware](https://www.github.com/vmware/) |
 | Shubham Pampattiwar | [shubham-pampattiwar](https://github.com/shubham-pampattiwar) | [OpenShift](https://github.com/openshift)
+| Yonghui Li | [Lyndon-Li](https://github.com/Lyndon-Li) | [VMware](https://www.github.com/vmware/) |
 
 ## Emeritus Maintainers
 * Adnan Abdulhussein ([prydonius](https://github.com/prydonius))
@@ -29,9 +30,10 @@
 
 | Feature Area | Lead |
 | ----------------------------- | :---------------------: |
-| Architect | Dave Smith-Uchida (dsu-igeek) |
-| Technical Lead | Daniel Jiang (reasonerjt) |
+| Architect | Dave Smith-Uchida [dsu-igeek](https://github.com/dsu-igeek) |
+| Technical Lead | Daniel Jiang [reasonerjt](https://github.com/reasonerjt) |
 | Kubernetes CSI Liaison |  |
 | Deployment |  |
-| Community Management | Orlin Vasilev (OrlinVasilev) |
-| Product Management | Eleanor Millman (eleanor-millman) |
+| Community Management | Orlin Vasilev [OrlinVasilev](https://github.com/OrlinVasilev) |
+| Product Management | Pradeep Kumar Chaturvedi [pradeepkchaturvedi](https://github.com/pradeepkchaturvedi) |
+

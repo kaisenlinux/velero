@@ -58,13 +58,12 @@ func (b *TTL) Init() {
 }
 
 func TTLTest() {
+	var err error
 	useVolumeSnapshots := true
 	test := new(TTL)
-	client, err := NewTestClient()
-	if err != nil {
-		println(err.Error())
-	}
-	Expect(err).To(Succeed(), "Failed to instantiate cluster client for backup tests")
+	client := *VeleroCfg.ClientToInstallVelero
+
+	//Expect(err).To(Succeed(), "Failed to instantiate cluster client for backup tests")
 
 	BeforeEach(func() {
 		flag.Parse()
@@ -76,12 +75,15 @@ func TTLTest() {
 	})
 
 	AfterEach(func() {
-		if VeleroCfg.InstallVelero {
-			VeleroCfg.GCFrequency = ""
-			if !VeleroCfg.Debug {
+		VeleroCfg.GCFrequency = ""
+		if !VeleroCfg.Debug {
+			By("Clean backups after test", func() {
+				DeleteBackups(context.Background(), *VeleroCfg.ClientToInstallVelero)
+			})
+			if VeleroCfg.InstallVelero {
 				Expect(VeleroUninstall(context.Background(), VeleroCfg.VeleroCLI, VeleroCfg.VeleroNamespace)).To(Succeed())
-				Expect(DeleteNamespace(test.ctx, client, test.testNS, false)).To(Succeed(), fmt.Sprintf("Failed to delete the namespace %s", test.testNS))
 			}
+			Expect(DeleteNamespace(test.ctx, client, test.testNS, false)).To(Succeed(), fmt.Sprintf("Failed to delete the namespace %s", test.testNS))
 		}
 	})
 
@@ -95,7 +97,7 @@ func TTLTest() {
 		By("Deploy sample workload of Kibishii", func() {
 			Expect(KibishiiPrepareBeforeBackup(test.ctx, client, VeleroCfg.CloudProvider,
 				test.testNS, VeleroCfg.RegistryCredentialFile, VeleroCfg.Features,
-				VeleroCfg.KibishiiDirectory, useVolumeSnapshots)).To(Succeed())
+				VeleroCfg.KibishiiDirectory, useVolumeSnapshots, DefaultKibishiiData)).To(Succeed())
 		})
 
 		var BackupCfg BackupConfig
@@ -142,7 +144,7 @@ func TTLTest() {
 
 		By(fmt.Sprintf("Restore %s", test.testNS), func() {
 			Expect(VeleroRestore(test.ctx, VeleroCfg.VeleroCLI,
-				VeleroCfg.VeleroNamespace, test.restoreName, test.backupName)).To(Succeed(), func() string {
+				VeleroCfg.VeleroNamespace, test.restoreName, test.backupName, "")).To(Succeed(), func() string {
 				RunDebug(test.ctx, VeleroCfg.VeleroCLI,
 					VeleroCfg.VeleroNamespace, "", test.restoreName)
 				return "Fail to restore workload"

@@ -28,10 +28,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/clock"
 	kubeerrs "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/vmware-tanzu/velero/internal/credentials"
 	"github.com/vmware-tanzu/velero/internal/delete"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/discovery"
@@ -39,16 +40,19 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/metrics"
 	"github.com/vmware-tanzu/velero/pkg/persistence"
 	"github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt"
-	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
-	"github.com/vmware-tanzu/velero/pkg/restic"
+	vsv1 "github.com/vmware-tanzu/velero/pkg/plugin/velero/volumesnapshotter/v1"
+	"github.com/vmware-tanzu/velero/pkg/repository"
 	"github.com/vmware-tanzu/velero/pkg/util/filesystem"
 	"github.com/vmware-tanzu/velero/pkg/util/kube"
+	"github.com/vmware-tanzu/velero/pkg/volume"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/vmware-tanzu/velero/pkg/podvolume"
 )
 
 const (
-	resticTimeout             = time.Minute
+	snapshotDeleteTimeout     = time.Minute
 	deleteBackupRequestMaxAge = 24 * time.Hour
 )
 
@@ -56,12 +60,13 @@ type backupDeletionReconciler struct {
 	client.Client
 	logger            logrus.FieldLogger
 	backupTracker     BackupTracker
-	resticMgr         restic.RepositoryManager
+	repoMgr           repository.Manager
 	metrics           *metrics.ServerMetrics
 	clock             clock.Clock
 	discoveryHelper   discovery.Helper
 	newPluginManager  func(logrus.FieldLogger) clientmgmt.Manager
 	backupStoreGetter persistence.ObjectBackupStoreGetter
+	credentialStore   credentials.FileStore
 }
 
 // NewBackupDeletionReconciler creates a new backup deletion reconciler.
@@ -69,28 +74,30 @@ func NewBackupDeletionReconciler(
 	logger logrus.FieldLogger,
 	client client.Client,
 	backupTracker BackupTracker,
-	resticMgr restic.RepositoryManager,
+	repoMgr repository.Manager,
 	metrics *metrics.ServerMetrics,
 	helper discovery.Helper,
 	newPluginManager func(logrus.FieldLogger) clientmgmt.Manager,
 	backupStoreGetter persistence.ObjectBackupStoreGetter,
+	credentialStore credentials.FileStore,
 ) *backupDeletionReconciler {
 	return &backupDeletionReconciler{
 		Client:            client,
 		logger:            logger,
 		backupTracker:     backupTracker,
-		resticMgr:         resticMgr,
+		repoMgr:           repoMgr,
 		metrics:           metrics,
 		clock:             clock.RealClock{},
 		discoveryHelper:   helper,
 		newPluginManager:  newPluginManager,
 		backupStoreGetter: backupStoreGetter,
+		credentialStore:   credentialStore,
 	}
 }
 
 func (r *backupDeletionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Make sure the expired requests can be deleted eventually
-	s := kube.NewPeriodicalEnqueueSource(r.logger, mgr.GetClient(), &velerov1api.DeleteBackupRequestList{}, time.Hour)
+	s := kube.NewPeriodicalEnqueueSource(r.logger, mgr.GetClient(), &velerov1api.DeleteBackupRequestList{}, time.Hour, kube.PeriodicalEnqueueSourceOption{})
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&velerov1api.DeleteBackupRequest{}).
 		Watches(s, nil).
@@ -198,7 +205,7 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	// if the request object has no labels defined, initialise an empty map since
+	// if the request object has no labels defined, initialize an empty map since
 	// we will be updating labels
 	if dbr.Labels == nil {
 		dbr.Labels = map[string]string{}
@@ -280,14 +287,14 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		if snapshots, err := backupStore.GetBackupVolumeSnapshots(backup.Name); err != nil {
 			errs = append(errs, errors.Wrap(err, "error getting backup's volume snapshots").Error())
 		} else {
-			volumeSnapshotters := make(map[string]velero.VolumeSnapshotter)
+			volumeSnapshotters := make(map[string]vsv1.VolumeSnapshotter)
 
 			for _, snapshot := range snapshots {
 				log.WithField("providerSnapshotID", snapshot.Status.ProviderSnapshotID).Info("Removing snapshot associated with backup")
 
 				volumeSnapshotter, ok := volumeSnapshotters[snapshot.Spec.Location]
 				if !ok {
-					if volumeSnapshotter, err = volumeSnapshottersForVSL(ctx, backup.Namespace, snapshot.Spec.Location, r.Client, pluginManager); err != nil {
+					if volumeSnapshotter, err = r.volumeSnapshottersForVSL(ctx, backup.Namespace, snapshot.Spec.Location, pluginManager); err != nil {
 						errs = append(errs, err.Error())
 						continue
 					}
@@ -300,8 +307,8 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			}
 		}
 	}
-	log.Info("Removing restic snapshots")
-	if deleteErrs := r.deleteResticSnapshots(ctx, backup); len(deleteErrs) > 0 {
+	log.Info("Removing pod volume snapshots")
+	if deleteErrs := r.deletePodVolumeSnapshots(ctx, backup); len(deleteErrs) > 0 {
 		for _, err := range deleteErrs {
 			errs = append(errs, err.Error())
 		}
@@ -385,19 +392,25 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	return ctrl.Result{}, nil
 }
 
-func volumeSnapshottersForVSL(
+func (r *backupDeletionReconciler) volumeSnapshottersForVSL(
 	ctx context.Context,
 	namespace, vslName string,
-	client client.Client,
 	pluginManager clientmgmt.Manager,
-) (velero.VolumeSnapshotter, error) {
+) (vsv1.VolumeSnapshotter, error) {
 	vsl := &velerov1api.VolumeSnapshotLocation{}
-	if err := client.Get(ctx, types.NamespacedName{
+	if err := r.Client.Get(ctx, types.NamespacedName{
 		Namespace: namespace,
 		Name:      vslName,
 	}, vsl); err != nil {
 		return nil, errors.Wrapf(err, "error getting volume snapshot location %s", vslName)
 	}
+
+	// add credential to config
+	err := volume.UpdateVolumeSnapshotLocationWithCredentialConfig(vsl, r.credentialStore, r.logger)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
 	volumeSnapshotter, err := pluginManager.GetVolumeSnapshotter(vsl.Spec.Provider)
 	if err != nil {
 		return nil, errors.Wrapf(err, "error getting volume snapshotter for provider %s", vsl.Spec.Provider)
@@ -434,22 +447,22 @@ func (r *backupDeletionReconciler) deleteExistingDeletionRequests(ctx context.Co
 	return errs
 }
 
-func (r *backupDeletionReconciler) deleteResticSnapshots(ctx context.Context, backup *velerov1api.Backup) []error {
-	if r.resticMgr == nil {
+func (r *backupDeletionReconciler) deletePodVolumeSnapshots(ctx context.Context, backup *velerov1api.Backup) []error {
+	if r.repoMgr == nil {
 		return nil
 	}
 
-	snapshots, err := restic.GetSnapshotsInBackup(ctx, backup, r.Client)
+	snapshots, err := getSnapshotsInBackup(ctx, backup, r.Client)
 	if err != nil {
 		return []error{err}
 	}
 
-	ctx2, cancelFunc := context.WithTimeout(ctx, resticTimeout)
+	ctx2, cancelFunc := context.WithTimeout(ctx, snapshotDeleteTimeout)
 	defer cancelFunc()
 
 	var errs []error
 	for _, snapshot := range snapshots {
-		if err := r.resticMgr.Forget(ctx2, snapshot); err != nil {
+		if err := r.repoMgr.Forget(ctx2, snapshot); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -489,4 +502,22 @@ func (r *backupDeletionReconciler) patchBackup(ctx context.Context, backup *vele
 		return nil, errors.Wrap(err, "error patching Backup")
 	}
 	return backup, nil
+}
+
+// getSnapshotsInBackup returns a list of all pod volume snapshot ids associated with
+// a given Velero backup.
+func getSnapshotsInBackup(ctx context.Context, backup *velerov1api.Backup, kbClient client.Client) ([]repository.SnapshotIdentifier, error) {
+	podVolumeBackups := &velerov1api.PodVolumeBackupList{}
+	options := &client.ListOptions{
+		LabelSelector: labels.Set(map[string]string{
+			velerov1api.BackupNameLabel: label.GetValidName(backup.Name),
+		}).AsSelector(),
+	}
+
+	err := kbClient.List(ctx, podVolumeBackups, options)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	return podvolume.GetSnapshotIdentifier(podVolumeBackups), nil
 }

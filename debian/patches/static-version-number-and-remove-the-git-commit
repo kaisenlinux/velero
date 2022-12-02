@@ -1,13 +1,13 @@
 Author: Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>
 
---- velero-1.9.3.orig/pkg/buildinfo/buildinfo.go
-+++ velero-1.9.3/pkg/buildinfo/buildinfo.go
+--- velero-1.10.0.orig/pkg/buildinfo/buildinfo.go
++++ velero-1.10.0/pkg/buildinfo/buildinfo.go
 @@ -23,7 +23,7 @@ import "fmt"
  
  var (
  	// Version is the current version of Velero, set by the go linker's -X flag at build time.
 -	Version string
-+	Version = "1.9.3"
++	Version = "1.10.0"
  
  	// GitSHA is the actual commit that is being built, set by the go linker's -X flag at build time.
  	GitSHA string

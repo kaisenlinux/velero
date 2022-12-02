@@ -13,4 +13,5 @@ XS-Go-Import-Path: github.com/vmware-tanzu/velero
 Package: velero
 Architecture: amd64 arm64
 Depends: ${shlibs:Depends}, ${misc:Depends}, golang-go (>= 1.18),
+Suggests: restic
 Description: Backup and migrate Kubernetes applications and their persistent volumes
