@@ -18,14 +18,13 @@ package k8s
 
 import (
 	"fmt"
-	"io/ioutil"
+	"os"
 	"os/exec"
 	"time"
 
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 	corev1 "k8s.io/api/core/v1"
-	corev1api "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 
@@ -43,7 +42,7 @@ func CreateSecretFromFiles(ctx context.Context, client TestClient, namespace str
 	data := make(map[string][]byte)
 
 	for key, filePath := range files {
-		contents, err := ioutil.ReadFile(filePath)
+		contents, err := os.ReadFile(filePath)
 		if err != nil {
 			return errors.WithMessagef(err, "Failed to read secret file %q", filePath)
 		}
@@ -64,12 +63,12 @@ func WaitForPods(ctx context.Context, client TestClient, namespace string, pods 
 			checkPod, err := client.ClientGo.CoreV1().Pods(namespace).Get(context.TODO(), podName, metav1.GetOptions{})
 			if err != nil {
 				//Should ignore "etcdserver: request timed out" kind of errors, try to get pod status again before timeout.
-				fmt.Println(errors.Wrap(err, fmt.Sprintf("Failed to verify pod %s/%s is %s, try again...\n", namespace, podName, corev1api.PodRunning)))
+				fmt.Println(errors.Wrap(err, fmt.Sprintf("Failed to verify pod %s/%s is %s, try again...\n", namespace, podName, corev1.PodRunning)))
 				return false, nil
 			}
 			// If any pod is still waiting we don't need to check any more so return and wait for next poll interval
-			if checkPod.Status.Phase != corev1api.PodRunning {
-				fmt.Printf("Pod %s is in state %s waiting for it to be %s\n", podName, checkPod.Status.Phase, corev1api.PodRunning)
+			if checkPod.Status.Phase != corev1.PodRunning {
+				fmt.Printf("Pod %s is in state %s waiting for it to be %s\n", podName, checkPod.Status.Phase, corev1.PodRunning)
 				return false, nil
 			}
 		}
@@ -255,29 +254,6 @@ func GetPVByPodName(client TestClient, namespace, podName string) (string, error
 	}
 	return pv_value.Name, nil
 }
-func CreatePodWithPVC(client TestClient, ns, podName, sc string, volumeNameList []string) (*corev1.Pod, error) {
-	volumes := []corev1.Volume{}
-	for _, volume := range volumeNameList {
-		pvc, err := CreatePVC(client, ns, fmt.Sprintf("pvc-%s", volume), sc)
-		if err != nil {
-			return nil, err
-		}
-		volumes = append(volumes, corev1.Volume{
-			Name: volume,
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: pvc.Name,
-					ReadOnly:  false,
-				},
-			},
-		})
-	}
-	pod, err := CreatePod(client, ns, podName, volumes)
-	if err != nil {
-		return nil, err
-	}
-	return pod, nil
-}
 
 func CreateFileToPod(ctx context.Context, namespace, podName, volume, filename, content string) error {
 	arg := []string{"exec", "-n", namespace, "-c", podName, podName,
@@ -340,4 +316,18 @@ func WaitForCRDEstablished(crdName string) error {
 		return err
 	}
 	return nil
+}
+
+func GetAllService(ctx context.Context) (string, error) {
+	args := []string{"get", "service", "-A"}
+	cmd := exec.CommandContext(context.Background(), "kubectl", args...)
+	fmt.Printf("Kubectl exec cmd =%v\n", cmd)
+	stdout, stderr, err := veleroexec.RunCommand(cmd)
+	fmt.Println(stdout)
+	if err != nil {
+		fmt.Println(stderr)
+		fmt.Println(err)
+		return "", err
+	}
+	return stdout, nil
 }

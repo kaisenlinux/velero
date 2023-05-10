@@ -46,12 +46,12 @@ fi
 if [[ "${PUBLISH:-}" != "TRUE" ]]; then
     echo "Not set to publish"
     goreleaser release \
-        --rm-dist \
+        --clean \
         --release-notes="${RELEASE_NOTES_FILE}" \
         --skip-publish
 else
     echo "Getting ready to publish"
     goreleaser release \
-        --rm-dist \
+        --clean \
         --release-notes="${RELEASE_NOTES_FILE}"
 fi

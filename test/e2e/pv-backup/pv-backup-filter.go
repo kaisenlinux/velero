@@ -32,7 +32,10 @@ var OptOutPVBackupTest func() = TestFunc(&PVBackupFiltering{annotation: OPT_OUT_
 
 func (p *PVBackupFiltering) Init() error {
 	p.Ctx, _ = context.WithTimeout(context.Background(), 60*time.Minute)
-	p.Client = TestClientInstance
+	p.VeleroCfg = VeleroCfg
+	p.Client = *p.VeleroCfg.ClientToInstallVelero
+	p.VeleroCfg.UseVolumeSnapshots = false
+	p.VeleroCfg.UseNodeAgent = true
 	p.NSBaseName = "ns"
 	p.NSIncluded = &[]string{fmt.Sprintf("%s-%s-%d", p.NSBaseName, p.id, 1), fmt.Sprintf("%s-%s-%d", p.NSBaseName, p.id, 2)}
 
@@ -45,7 +48,7 @@ func (p *PVBackupFiltering) Init() error {
 }
 
 func (p *PVBackupFiltering) StartRun() error {
-	err := installStorageClass(context.Background(), fmt.Sprintf("testdata/storage-class/%s.yaml", VeleroCfg.CloudProvider))
+	err := InstallStorageClass(context.Background(), fmt.Sprintf("testdata/storage-class/%s.yaml", VeleroCfg.CloudProvider))
 	if err != nil {
 		return err
 	}
@@ -94,7 +97,7 @@ func (p *PVBackupFiltering) CreateResources() error {
 				podName := fmt.Sprintf("pod-%d", i)
 				pods = append(pods, podName)
 				By(fmt.Sprintf("Create pod %s in namespace %s", podName, ns), func() {
-					pod, err := CreatePodWithPVC(p.Client, ns, podName, "e2e-storage-class", volumes)
+					pod, err := CreatePod(p.Client, ns, podName, "e2e-storage-class", "", volumes, nil, nil)
 					Expect(err).To(Succeed())
 					ann := map[string]string{
 						p.annotation: volumesToAnnotation,
@@ -115,7 +118,7 @@ func (p *PVBackupFiltering) CreateResources() error {
 			})
 		}
 	})
-	By(fmt.Sprintf("Polulate all pods %s with file %s", p.podsList, FILE_NAME), func() {
+	By(fmt.Sprintf("Populate all pods %s with file %s", p.podsList, FILE_NAME), func() {
 		for index, ns := range *p.NSIncluded {
 			By(fmt.Sprintf("Creating file in all pods to start %d in namespace %s", index, ns), func() {
 				WaitForPods(p.Ctx, p.Client, ns, p.podsList[index])
@@ -201,10 +204,4 @@ func fileNotExist(ctx context.Context, namespace, podName, volume string) error 
 		return errors.New(fmt.Sprintf("UNEXPECTED: File %s exist in volume %s of pod %s in namespace %s.",
 			FILE_NAME, volume, podName, namespace))
 	}
-}
-
-func installStorageClass(ctx context.Context, yaml string) error {
-	fmt.Printf("Install storage class with %s.\n", yaml)
-	err := KubectlApplyByFile(ctx, yaml)
-	return err
 }

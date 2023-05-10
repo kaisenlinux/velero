@@ -28,9 +28,10 @@ type ScheduleBackup struct {
 var ScheduleBackupTest func() = TestFunc(&ScheduleBackup{TestCase: TestCase{NSBaseName: "schedule-test"}})
 
 func (n *ScheduleBackup) Init() error {
-	n.Client = TestClientInstance
+	n.VeleroCfg = VeleroCfg
+	n.Client = *n.VeleroCfg.ClientToInstallVelero
 	n.Period = 3      // Unit is minute
-	n.verifyTimes = 5 // More verify times more confidence
+	n.verifyTimes = 5 // More larger verify times more confidence we have
 	n.TestMsg = &TestMSG{
 		Desc:      "Set up a scheduled backup defined by a Cron expression",
 		FailedMSG: "Failed to schedule a backup",
@@ -59,7 +60,7 @@ func (n *ScheduleBackup) CreateResources() error {
 		})
 		configmaptName := n.NSBaseName
 		fmt.Printf("Creating configmap %s in namespaces ...%s\n", configmaptName, ns)
-		_, err := CreateConfigMap(n.Client.ClientGo, ns, configmaptName, nil)
+		_, err := CreateConfigMap(n.Client.ClientGo, ns, configmaptName, nil, nil)
 		Expect(err).To(Succeed(), fmt.Sprintf("failed to create configmap in the namespace %q", ns))
 		Expect(WaitForConfigMapComplete(n.Client.ClientGo, ns, configmaptName)).To(Succeed(),
 			fmt.Sprintf("ailed to ensure secret completion in namespace: %q", ns))
