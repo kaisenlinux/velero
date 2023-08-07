@@ -1,4 +1,0 @@
-debian/velero.png usr/share/pixmaps
-_build/velero usr/share/bash-completion/completions/
-_build/_velero usr/share/zsh/vendor-completions/
-velero usr/bin

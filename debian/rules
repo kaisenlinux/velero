@@ -4,21 +4,21 @@ export GOPATH=$(CURDIR)/_build
 export GOBIN=$(CURDIR)/_build/bin
 
 %:
-	dh $@ --buildsystem=golang
+	dh $@ --buildsystem=golang --builddirectory=_build
 
 override_dh_auto_clean:
-	rm -rf $(CURDIR)/_build
-	rm -rf $(CURDIR)/obj-x86_64-linux-gnu
+	rm -rf $(CURDIR)/_build $(CURDIR)/obj-x86_64-linux-gnu
 
 override_dh_auto_build:
 	go build $(CURDIR)/cmd/velero
-	$(CURDIR)/velero completion bash > $(CURDIR)/_build/velero
-	$(CURDIR)/velero completion zsh > $(CURDIR)/_build/_velero
 
 override_dh_auto_test:
 	$(CURDIR)/velero --help
 
 override_dh_auto_install:
-	dh_auto_install -- --no-source
+	install -p -m 0644 $(CURDIR)/debian/velero.png $(CURDIR)/debian/velero/usr/share/pixmaps
+	install -p -m 0755 $(CURDIR)/velero $(CURDIR)/debian/velero/usr/bin
+	$(CURDIR)/debian/velero/usr/bin/velero completion bash > $(CURDIR)/debian/velero/usr/share/bash-completion/completions/velero
+	$(CURDIR)/debian/velero/usr/bin/velero completion zsh > $(CURDIR)/debian/velero/usr/share/zsh/vendor-completions/_velero
 
 override_dh_dwz:

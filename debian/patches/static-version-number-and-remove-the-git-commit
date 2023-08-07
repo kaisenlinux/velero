@@ -1,18 +1,18 @@
 Author: Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>
 
---- velero-1.10.0.orig/pkg/buildinfo/buildinfo.go
-+++ velero-1.10.0/pkg/buildinfo/buildinfo.go
+--- velero-1.11.1.orig/pkg/buildinfo/buildinfo.go
++++ velero-1.11.1/pkg/buildinfo/buildinfo.go
 @@ -23,7 +23,7 @@ import "fmt"
  
  var (
  	// Version is the current version of Velero, set by the go linker's -X flag at build time.
 -	Version string
-+	Version = "1.11.0"
++	Version = "1.11.1"
  
  	// GitSHA is the actual commit that is being built, set by the go linker's -X flag at build time.
  	GitSHA string
---- velero-1.9.3.orig/pkg/cmd/cli/version/version.go
-+++ velero-1.9.3/pkg/cmd/cli/version/version.go
+--- velero-1.11.1.orig/pkg/cmd/cli/version/version.go
++++ velero-1.11.1/pkg/cmd/cli/version/version.go
 @@ -68,7 +68,6 @@ func NewCommand(f client.Factory) *cobra
  func printVersion(w io.Writer, clientOnly bool, kbClient kbclient.Client, serverStatusGetter serverstatus.ServerStatusGetter) {
  	fmt.Fprintln(w, "Client:")

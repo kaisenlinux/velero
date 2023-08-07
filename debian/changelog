@@ -1,3 +1,11 @@
+velero (1.11.1-1kaisen) kaisen-packages; urgency=medium
+
+  * Import the 1.11.1 version
+  * Bump the go version required to build velero
+  * Remove golang-go as package dependancy
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Mon, 07 Aug 2023 22:33:16 +0100
+
 velero (1.11.0-1kaisen) kaisen-packages; urgency=medium
 
   * Import the 1.11.0 version
