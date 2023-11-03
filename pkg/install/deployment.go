@@ -46,6 +46,9 @@ type podTemplateConfig struct {
 	defaultVolumesToFsBackup        bool
 	serviceAccountName              string
 	uploaderType                    string
+	privilegedNodeAgent             bool
+	defaultSnapshotMoveData         bool
+	disableInformerCache            bool
 }
 
 func WithImage(image string) podTemplateOption {
@@ -136,9 +139,27 @@ func WithDefaultVolumesToFsBackup() podTemplateOption {
 	}
 }
 
+func WithDefaultSnapshotMoveData() podTemplateOption {
+	return func(c *podTemplateConfig) {
+		c.defaultSnapshotMoveData = true
+	}
+}
+
+func WithDisableInformerCache() podTemplateOption {
+	return func(c *podTemplateConfig) {
+		c.disableInformerCache = true
+	}
+}
+
 func WithServiceAccountName(sa string) podTemplateOption {
 	return func(c *podTemplateConfig) {
 		c.serviceAccountName = sa
+	}
+}
+
+func WithPrivilegedNodeAgent() podTemplateOption {
+	return func(c *podTemplateConfig) {
+		c.privilegedNodeAgent = true
 	}
 }
 
@@ -156,7 +177,6 @@ func Deployment(namespace string, opts ...podTemplateOption) *appsv1.Deployment 
 	imageParts := strings.Split(c.image, ":")
 	if len(imageParts) == 2 && imageParts[1] != "latest" {
 		pullPolicy = corev1.PullIfNotPresent
-
 	}
 
 	args := []string{"server"}
@@ -166,6 +186,14 @@ func Deployment(namespace string, opts ...podTemplateOption) *appsv1.Deployment 
 
 	if c.defaultVolumesToFsBackup {
 		args = append(args, "--default-volumes-to-fs-backup=true")
+	}
+
+	if c.defaultSnapshotMoveData {
+		args = append(args, "--default-snapshot-move-data=true")
+	}
+
+	if c.disableInformerCache {
+		args = append(args, "--disable-informer-cache=true")
 	}
 
 	if len(c.uploaderType) > 0 {
@@ -308,7 +336,6 @@ func Deployment(namespace string, opts ...podTemplateOption) *appsv1.Deployment 
 			container := *builder.ForPluginContainer(image, pullPolicy).Result()
 			deployment.Spec.Template.Spec.InitContainers = append(deployment.Spec.Template.Spec.InitContainers, container)
 		}
-
 	}
 
 	return deployment

@@ -22,6 +22,11 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+
+	velerov2alpha1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
+	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
+
 	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -29,7 +34,9 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	kubeerrs "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/utils/clock"
+
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/vmware-tanzu/velero/internal/credentials"
@@ -126,15 +133,16 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Since we use the reconciler along with the PeriodicalEnqueueSource, there may be reconciliation triggered by
 	// stale requests.
-	if dbr.Status.Phase == velerov1api.DeleteBackupRequestPhaseProcessed {
+	if dbr.Status.Phase == velerov1api.DeleteBackupRequestPhaseProcessed ||
+		dbr.Status.Phase == velerov1api.DeleteBackupRequestPhaseInProgress {
 		age := r.clock.Now().Sub(dbr.CreationTimestamp.Time)
 		if age >= deleteBackupRequestMaxAge { // delete the expired request
-			log.Debug("The request is expired, deleting it.")
+			log.Debugf("The request is expired, status: %s, deleting it.", dbr.Status.Phase)
 			if err := r.Delete(ctx, dbr); err != nil {
 				log.WithError(err).Error("Error deleting DeleteBackupRequest")
 			}
 		} else {
-			log.Info("The request has been processed, skip.")
+			log.Infof("The request has status '%s', skip.", dbr.Status.Phase)
 		}
 		return ctrl.Result{}, nil
 	}
@@ -314,6 +322,33 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 	}
 
+	if boolptr.IsSetToTrue(backup.Spec.SnapshotMoveData) {
+		log.Info("Removing snapshot data by data mover")
+		if deleteErrs := r.deleteMovedSnapshots(ctx, backup); len(deleteErrs) > 0 {
+			for _, err := range deleteErrs {
+				errs = append(errs, err.Error())
+			}
+		}
+		duList := &velerov2alpha1.DataUploadList{}
+		log.Info("Removing local datauploads")
+		if err := r.Client.List(ctx, duList, &client.ListOptions{
+			Namespace: backup.Namespace,
+			LabelSelector: labels.SelectorFromSet(map[string]string{
+				velerov1api.BackupNameLabel: label.GetValidName(backup.Name),
+			}),
+		}); err != nil {
+			log.WithError(err).Error("Error listing datauploads")
+			errs = append(errs, err.Error())
+		} else {
+			for i := range duList.Items {
+				du := duList.Items[i]
+				if err := r.Delete(ctx, &du); err != nil {
+					errs = append(errs, err.Error())
+				}
+			}
+		}
+	}
+
 	if backupStore != nil {
 		log.Info("Removing backup from backup storage")
 		if err := backupStore.DeleteBackup(backup.Name); err != nil {
@@ -330,23 +365,44 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}); err != nil {
 		log.WithError(errors.WithStack(err)).Error("Error listing restore API objects")
 	} else {
+		// Restore files in object storage will be handled by restore finalizer, so we simply need to initiate a delete request on restores here.
 		for i, restore := range restoreList.Items {
 			if restore.Spec.BackupName != backup.Name {
 				continue
 			}
 			restoreLog := log.WithField("restore", kube.NamespaceAndName(&restoreList.Items[i]))
 
-			restoreLog.Info("Deleting restore log/results from backup storage")
-			if err := backupStore.DeleteRestore(restore.Name); err != nil {
-				errs = append(errs, err.Error())
-				// if we couldn't delete the restore files, don't delete the API object
-				continue
-			}
-
 			restoreLog.Info("Deleting restore referencing backup")
 			if err := r.Delete(ctx, &restoreList.Items[i]); err != nil {
 				errs = append(errs, errors.Wrapf(err, "error deleting restore %s", kube.NamespaceAndName(&restoreList.Items[i])).Error())
 			}
+		}
+
+		// Wait for the deletion of restores within certain amount of time.
+		// Notice that there could be potential errors during the finalization process, which may result in the failure to delete the restore.
+		// Therefore, it is advisable to set a timeout period for waiting.
+		err := wait.PollImmediate(time.Second, time.Minute, func() (bool, error) {
+			restoreList := &velerov1api.RestoreList{}
+			if err := r.List(ctx, restoreList, &client.ListOptions{Namespace: backup.Namespace, LabelSelector: selector}); err != nil {
+				return false, err
+			}
+			cnt := 0
+			for _, restore := range restoreList.Items {
+				if restore.Spec.BackupName != backup.Name {
+					continue
+				}
+				cnt++
+			}
+
+			if cnt > 0 {
+				return false, nil
+			} else {
+				return true, nil
+			}
+		})
+		if err != nil {
+			log.WithError(err).Error("Error polling for deletion of restores")
+			errs = append(errs, errors.Wrapf(err, "error deleting restore %s", err).Error())
 		}
 	}
 
@@ -469,6 +525,41 @@ func (r *backupDeletionReconciler) deletePodVolumeSnapshots(ctx context.Context,
 	return errs
 }
 
+func (r *backupDeletionReconciler) deleteMovedSnapshots(ctx context.Context, backup *velerov1api.Backup) []error {
+	if r.repoMgr == nil {
+		return nil
+	}
+	list := &corev1.ConfigMapList{}
+	if err := r.Client.List(ctx, list, &client.ListOptions{
+		Namespace: backup.Namespace,
+		LabelSelector: labels.SelectorFromSet(
+			map[string]string{
+				velerov1api.BackupNameLabel:             label.GetValidName(backup.Name),
+				velerov1api.DataUploadSnapshotInfoLabel: "true",
+			}),
+	}); err != nil {
+		return []error{errors.Wrapf(err, "failed to retrieve config for snapshot info")}
+	}
+	var errs []error
+	for i := range list.Items {
+		cm := list.Items[i]
+		snapshot := repository.SnapshotIdentifier{}
+		b, _ := json.Marshal(cm.Data)
+		if err := json.Unmarshal(b, &snapshot); err != nil {
+			errs = append(errs, errors.Wrapf(err, "failed to unmarshal snapshot info"))
+			continue
+		}
+		if err := r.repoMgr.Forget(ctx, snapshot); err != nil {
+			errs = append(errs, errors.Wrapf(err, "failed to delete snapshot %s, namespace: %s", snapshot.SnapshotID, snapshot.VolumeNamespace))
+		}
+		r.logger.Infof("Deleted snapshot %s, namespace: %s, repo type: %s", snapshot.SnapshotID, snapshot.VolumeNamespace, snapshot.RepositoryType)
+		if err := r.Client.Delete(ctx, &cm); err != nil {
+			r.logger.Warnf("Failed to delete snapshot info configmap %s/%s: %v", cm.Namespace, cm.Name, err)
+		}
+	}
+	return errs
+}
+
 func (r *backupDeletionReconciler) patchDeleteBackupRequest(ctx context.Context, req *velerov1api.DeleteBackupRequest, mutate func(*velerov1api.DeleteBackupRequest)) (*velerov1api.DeleteBackupRequest, error) {
 	original := req.DeepCopy()
 	mutate(req)
@@ -479,7 +570,7 @@ func (r *backupDeletionReconciler) patchDeleteBackupRequest(ctx context.Context,
 }
 
 func (r *backupDeletionReconciler) patchBackup(ctx context.Context, backup *velerov1api.Backup, mutate func(*velerov1api.Backup)) (*velerov1api.Backup, error) {
-	//TODO: The patchHelper can't be used here because the `backup/xxx/status` does not exist, until the bakcup resource is refactored
+	//TODO: The patchHelper can't be used here because the `backup/xxx/status` does not exist, until the backup resource is refactored
 
 	// Record original json
 	oldData, err := json.Marshal(backup)

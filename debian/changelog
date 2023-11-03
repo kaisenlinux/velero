@@ -1,3 +1,9 @@
+velero (1.12.1-1kaisen) kaisen-packages; urgency=medium
+
+  * Import the 1.12.1 version
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Fri, 03 Nov 2023 13:51:13 +0100
+
 velero (1.11.1-1kaisen) kaisen-packages; urgency=medium
 
   * Import the 1.11.1 version

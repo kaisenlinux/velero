@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM --platform=linux/amd64 golang:1.20.6-bullseye
+FROM --platform=linux/amd64 golang:1.20.10-bullseye
 
 ARG GOPROXY
 
@@ -30,7 +30,7 @@ RUN wget --quiet https://github.com/kubernetes-sigs/kubebuilder/releases/downloa
     chmod +x /usr/local/kubebuilder/bin/kubebuilder
 
 # get controller-tools
-RUN go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.7.0
+RUN go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.12.0
 
 # get goimports (the revision is pinned so we don't indiscriminately update, but the particular commit
 # is not important)

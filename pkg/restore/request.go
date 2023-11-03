@@ -24,6 +24,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/runtime"
 
+	"github.com/vmware-tanzu/velero/internal/resourcemodifiers"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/itemoperation"
 	"github.com/vmware-tanzu/velero/pkg/volume"
@@ -50,13 +51,15 @@ func resourceKey(obj runtime.Object) string {
 type Request struct {
 	*velerov1api.Restore
 
-	Log                logrus.FieldLogger
-	Backup             *velerov1api.Backup
-	PodVolumeBackups   []*velerov1api.PodVolumeBackup
-	VolumeSnapshots    []*volume.Snapshot
-	BackupReader       io.Reader
-	RestoredItems      map[itemKey]restoredItemStatus
-	itemOperationsList *[]*itemoperation.RestoreOperation
+	Log                  logrus.FieldLogger
+	Backup               *velerov1api.Backup
+	PodVolumeBackups     []*velerov1api.PodVolumeBackup
+	VolumeSnapshots      []*volume.Snapshot
+	BackupReader         io.Reader
+	RestoredItems        map[itemKey]restoredItemStatus
+	itemOperationsList   *[]*itemoperation.RestoreOperation
+	ResourceModifiers    *resourcemodifiers.ResourceModifiers
+	DisableInformerCache bool
 }
 
 type restoredItemStatus struct {

@@ -22,13 +22,11 @@ import (
 	"strings"
 	"time"
 
-	kbclient "sigs.k8s.io/controller-runtime/pkg/client"
-
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubeerrs "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/cache"
+	kbclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/builder"
@@ -36,9 +34,8 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/cmd"
 	"github.com/vmware-tanzu/velero/pkg/cmd/util/flag"
 	"github.com/vmware-tanzu/velero/pkg/cmd/util/output"
-	veleroclient "github.com/vmware-tanzu/velero/pkg/generated/clientset/versioned"
-	v1 "github.com/vmware-tanzu/velero/pkg/generated/informers/externalversions/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/util/collections"
+	"github.com/vmware-tanzu/velero/pkg/util/kube"
 )
 
 func NewCreateCommand(f client.Factory, use string) *cobra.Command {
@@ -85,6 +82,8 @@ type CreateOptions struct {
 	Name                            string
 	TTL                             time.Duration
 	SnapshotVolumes                 flag.OptionalBool
+	SnapshotMoveData                flag.OptionalBool
+	DataMover                       string
 	DefaultVolumesToFsBackup        flag.OptionalBool
 	IncludeNamespaces               flag.StringArray
 	ExcludeNamespaces               flag.StringArray
@@ -96,6 +95,7 @@ type CreateOptions struct {
 	ExcludeNamespaceScopedResources flag.StringArray
 	Labels                          flag.Map
 	Selector                        flag.LabelSelector
+	OrSelector                      flag.OrLabelSelector
 	IncludeClusterResources         flag.OptionalBool
 	Wait                            bool
 	StorageLocation                 string
@@ -105,7 +105,7 @@ type CreateOptions struct {
 	CSISnapshotTimeout              time.Duration
 	ItemOperationTimeout            time.Duration
 	ResPoliciesConfigmap            string
-	client                          veleroclient.Interface
+	client                          kbclient.WithWatch
 }
 
 func NewCreateOptions() *CreateOptions {
@@ -131,21 +131,26 @@ func (o *CreateOptions) BindFlags(flags *pflag.FlagSet) {
 	flags.StringVar(&o.StorageLocation, "storage-location", "", "Location in which to store the backup.")
 	flags.StringSliceVar(&o.SnapshotLocations, "volume-snapshot-locations", o.SnapshotLocations, "List of locations (at most one per provider) where volume snapshots should be stored.")
 	flags.VarP(&o.Selector, "selector", "l", "Only back up resources matching this label selector.")
+	flags.Var(&o.OrSelector, "or-selector", "Backup resources matching at least one of the label selector from the list. Label selectors should be separated by ' or '. For example, foo=bar or app=nginx")
 	flags.StringVar(&o.OrderedResources, "ordered-resources", "", "Mapping Kinds to an ordered list of specific resources of that Kind.  Resource names are separated by commas and their names are in format 'namespace/resourcename'. For cluster scope resource, simply use resource name. Key-value pairs in the mapping are separated by semi-colon.  Example: 'pods=ns1/pod1,ns1/pod2;persistentvolumeclaims=ns1/pvc4,ns1/pvc8'.  Optional.")
 	flags.DurationVar(&o.CSISnapshotTimeout, "csi-snapshot-timeout", o.CSISnapshotTimeout, "How long to wait for CSI snapshot creation before timeout.")
 	flags.DurationVar(&o.ItemOperationTimeout, "item-operation-timeout", o.ItemOperationTimeout, "How long to wait for async plugin operations before timeout.")
 	f := flags.VarPF(&o.SnapshotVolumes, "snapshot-volumes", "", "Take snapshots of PersistentVolumes as part of the backup. If the parameter is not set, it is treated as setting to 'true'.")
 	// this allows the user to just specify "--snapshot-volumes" as shorthand for "--snapshot-volumes=true"
 	// like a normal bool flag
-	f.NoOptDefVal = "true"
+	f.NoOptDefVal = cmd.TRUE
+
+	f = flags.VarPF(&o.SnapshotMoveData, "snapshot-move-data", "", "Specify whether snapshot data should be moved")
+	f.NoOptDefVal = cmd.TRUE
 
 	f = flags.VarPF(&o.IncludeClusterResources, "include-cluster-resources", "", "Include cluster-scoped resources in the backup. Cannot work with include-cluster-scoped-resources, exclude-cluster-scoped-resources, include-namespace-scoped-resources and exclude-namespace-scoped-resources.")
-	f.NoOptDefVal = "true"
+	f.NoOptDefVal = cmd.TRUE
 
 	f = flags.VarPF(&o.DefaultVolumesToFsBackup, "default-volumes-to-fs-backup", "", "Use pod volume file system backup by default for volumes")
-	f.NoOptDefVal = "true"
+	f.NoOptDefVal = cmd.TRUE
 
 	flags.StringVar(&o.ResPoliciesConfigmap, "resource-policies-configmap", "", "Reference to the resource policies configmap that backup using")
+	flags.StringVar(&o.DataMover, "data-mover", "", "Specify the data mover to be used by the backup. If the parameter is not set or set as 'velero', the built-in data mover will be used")
 }
 
 // BindWait binds the wait flag separately so it is not called by other create
@@ -165,9 +170,8 @@ func (o *CreateOptions) Validate(c *cobra.Command, args []string, f client.Facto
 		return err
 	}
 
-	client, err := f.KubebuilderClient()
-	if err != nil {
-		return err
+	if o.Selector.LabelSelector != nil && o.OrSelector.OrLabelSelectors != nil {
+		return fmt.Errorf("either a 'selector' or an 'or-selector' can be specified, but not both")
 	}
 
 	// Ensure that unless FromSchedule is set, args contains a backup name
@@ -188,7 +192,7 @@ func (o *CreateOptions) Validate(c *cobra.Command, args []string, f client.Facto
 
 	if o.StorageLocation != "" {
 		location := &velerov1api.BackupStorageLocation{}
-		if err := client.Get(context.Background(), kbclient.ObjectKey{
+		if err := o.client.Get(context.Background(), kbclient.ObjectKey{
 			Namespace: f.Namespace(),
 			Name:      o.StorageLocation,
 		}, location); err != nil {
@@ -197,7 +201,8 @@ func (o *CreateOptions) Validate(c *cobra.Command, args []string, f client.Facto
 	}
 
 	for _, loc := range o.SnapshotLocations {
-		if _, err := o.client.VeleroV1().VolumeSnapshotLocations(f.Namespace()).Get(context.TODO(), loc, metav1.GetOptions{}); err != nil {
+		snapshotLocation := new(velerov1api.VolumeSnapshotLocation)
+		if err := o.client.Get(context.Background(), kbclient.ObjectKey{Namespace: f.Namespace(), Name: loc}, snapshotLocation); err != nil {
 			return err
 		}
 	}
@@ -210,7 +215,7 @@ func (o *CreateOptions) Complete(args []string, f client.Factory) error {
 	if len(args) > 0 {
 		o.Name = args[0]
 	}
-	client, err := f.Client()
+	client, err := f.KubebuilderWatchClient()
 	if err != nil {
 		return err
 	}
@@ -232,7 +237,6 @@ func (o *CreateOptions) Run(c *cobra.Command, f client.Factory) error {
 		fmt.Println("Creating backup from schedule, all other filters are ignored.")
 	}
 
-	var backupInformer cache.SharedIndexInformer
 	var updates chan *velerov1api.Backup
 	if o.Wait {
 		stop := make(chan struct{})
@@ -240,12 +244,17 @@ func (o *CreateOptions) Run(c *cobra.Command, f client.Factory) error {
 
 		updates = make(chan *velerov1api.Backup)
 
-		backupInformer = v1.NewBackupInformer(o.client, f.Namespace(), 0, nil)
-
+		lw := kube.InternalLW{
+			Client:     o.client,
+			Namespace:  f.Namespace(),
+			ObjectList: new(velerov1api.BackupList),
+		}
+		backupInformer := cache.NewSharedInformer(&lw, &velerov1api.Backup{}, time.Second)
 		backupInformer.AddEventHandler(
 			cache.FilteringResourceEventHandler{
 				FilterFunc: func(obj interface{}) bool {
 					backup, ok := obj.(*velerov1api.Backup)
+
 					if !ok {
 						return false
 					}
@@ -269,10 +278,11 @@ func (o *CreateOptions) Run(c *cobra.Command, f client.Factory) error {
 				},
 			},
 		)
+
 		go backupInformer.Run(stop)
 	}
 
-	_, err = o.client.VeleroV1().Backups(backup.Namespace).Create(context.TODO(), backup, metav1.CreateOptions{})
+	err = o.client.Create(context.TODO(), backup, &kbclient.CreateOptions{})
 	if err != nil {
 		return err
 	}
@@ -335,7 +345,8 @@ func (o *CreateOptions) BuildBackup(namespace string) (*velerov1api.Backup, erro
 	var backupBuilder *builder.BackupBuilder
 
 	if o.FromSchedule != "" {
-		schedule, err := o.client.VeleroV1().Schedules(namespace).Get(context.TODO(), o.FromSchedule, metav1.GetOptions{})
+		schedule := new(velerov1api.Schedule)
+		err := o.client.Get(context.TODO(), kbclient.ObjectKey{Namespace: namespace, Name: o.FromSchedule}, schedule)
 		if err != nil {
 			return nil, err
 		}
@@ -355,11 +366,13 @@ func (o *CreateOptions) BuildBackup(namespace string) (*velerov1api.Backup, erro
 			IncludedNamespaceScopedResources(o.IncludeNamespaceScopedResources...).
 			ExcludedNamespaceScopedResources(o.ExcludeNamespaceScopedResources...).
 			LabelSelector(o.Selector.LabelSelector).
+			OrLabelSelector(o.OrSelector.OrLabelSelectors).
 			TTL(o.TTL).
 			StorageLocation(o.StorageLocation).
 			VolumeSnapshotLocations(o.SnapshotLocations...).
 			CSISnapshotTimeout(o.CSISnapshotTimeout).
-			ItemOperationTimeout(o.ItemOperationTimeout)
+			ItemOperationTimeout(o.ItemOperationTimeout).
+			DataMover(o.DataMover)
 		if len(o.OrderedResources) > 0 {
 			orders, err := ParseOrderedResources(o.OrderedResources)
 			if err != nil {
@@ -370,6 +383,9 @@ func (o *CreateOptions) BuildBackup(namespace string) (*velerov1api.Backup, erro
 
 		if o.SnapshotVolumes.Value != nil {
 			backupBuilder.SnapshotVolumes(*o.SnapshotVolumes.Value)
+		}
+		if o.SnapshotMoveData.Value != nil {
+			backupBuilder.SnapshotMoveData(*o.SnapshotMoveData.Value)
 		}
 		if o.IncludeClusterResources.Value != nil {
 			backupBuilder.IncludeClusterResources(*o.IncludeClusterResources.Value)

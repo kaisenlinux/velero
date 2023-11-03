@@ -27,11 +27,14 @@ import (
 	k8sfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	velerov2alpha1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
 )
 
 func NewFakeControllerRuntimeClientBuilder(t *testing.T) *k8sfake.ClientBuilder {
 	scheme := runtime.NewScheme()
 	err := velerov1api.AddToScheme(scheme)
+	require.NoError(t, err)
+	err = velerov2alpha1api.AddToScheme(scheme)
 	require.NoError(t, err)
 	err = corev1api.AddToScheme(scheme)
 	require.NoError(t, err)
@@ -44,9 +47,11 @@ func NewFakeControllerRuntimeClient(t *testing.T, initObjs ...runtime.Object) cl
 	scheme := runtime.NewScheme()
 	err := velerov1api.AddToScheme(scheme)
 	require.NoError(t, err)
+	err = velerov2alpha1api.AddToScheme(scheme)
+	require.NoError(t, err)
 	err = corev1api.AddToScheme(scheme)
 	require.NoError(t, err)
 	err = snapshotv1api.AddToScheme(scheme)
 	require.NoError(t, err)
-	return k8sfake.NewFakeClientWithScheme(scheme, initObjs...)
+	return k8sfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(initObjs...).Build()
 }

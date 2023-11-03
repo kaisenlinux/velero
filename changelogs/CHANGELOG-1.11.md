@@ -1,26 +1,3 @@
-## v1.11.1
-### 2023-07-19
-
-### Download
-https://github.com/vmware-tanzu/velero/releases/tag/v1.11.1
-
-### Container Image
-`velero/velero:v1.11.1`
-
-### Documentation
-https://velero.io/docs/v1.11/
-
-### Upgrading
-https://velero.io/docs/v1.11/upgrade-to-1.11/
-
-### All changes
-  * Add support for OpenStack CSI drivers topology keys (#6488, @kayrus)
-  * Enhance the code because of #6297, the return value of GetBucketRegion is not recorded, as a result, when it fails, we have no way to get the cause (#6477, @Lyndon-Li)
-  * Fixed a bug where status.progress is not getting updated for backups. (#6324, @blackpiglet)
-  * Restore Endpoints before Services (#6316, @ywk253100)
-  * Fix issue #6182. If pod is not running, don't treat it as an error, let it go and leave a warning. (#6189, @Lyndon-Li)
-
-
 ## v1.11
 ### 2023-04-07
 
@@ -52,22 +29,16 @@ The Progress() and Cancel() methods are needed to facilitate long-running Restor
 This is intended as a replacement for the previously-approved Upload Progress Monitoring design ([Upload Progress Monitoring](https://github.com/vmware-tanzu/velero/blob/main/design/upload-progress.md)) to expand the supported use cases beyond snapshot upload to include what was previously called Async Backup/Restore Item Actions.
 
 #### Flexible resource policy that can filter volumes to skip in the backup
-This feature provides a flexible policy to filter volumes in the backup without requiring patching any labels or annotations to the pods or volumes. This policy is configured as k8s ConfigMap and maintained by the users themselves, and it can be extended to more scenarios in the future. By now, the policy rules out volumes from backup depending on the CSI driver, NFS setting, volume size, and StorageClass setting. Please refer to [Resource policies rules](https://velero.io/docs/v1.11/resource-filtering/#resource-policies) for the policy's ConifgMap format. It is not guaranteed to work on unofficial third-party plugins as it may not follow the existing backup workflow code logic of Velero.
+This feature provides a flexible policy to filter volumes in the backup without requiring patching any labels or annotations to the pods or volumes. This policy is configured as k8s ConfigMap and maintained by the users themselves, and it can be extended to more scenarios in the future. By now, the policy rules out volumes from backup depending on the CSI driver, NFS setting, volume size, and StorageClass setting. Please refer to [policy API design](https://github.com/vmware-tanzu/velero/blob/main/design/Implemented/handle-backup-of-volumes-by-resources-filters.md#api-design) for the policy's ConifgMap format. It is not guaranteed to work on unofficial third-party plugins as it may not follow the existing backup workflow code logic of Velero.
 
 #### Resource Filters that can distinguish cluster scope and namespace scope resources
 This feature adds four new resource filters for backup. The new filters are separated into cluster scope and namespace scope. Before this feature, Velero could not filter cluster scope resources precisely. This feature provides the ability and refactors existing resource filter parameters.
-
-#### New parameter in installation to customize the serviceaccount name
-The `velero install` sub-command now includes a new parameter,`--service-account-name`, which allows users to specify the ServiceAccountName for the Velero and node-agent pods. This feature may be particularly useful for users who utilize IRSA (IAM Roles for Service Accounts) in Amazon EKS (Elastic Kubernetes Service)."
 
 #### Add a parameter for setting the Velero server connection with the k8s API server's timeout
 In Velero, some code pieces need to communicate with the k8s API server. Before v1.11, these code pieces used hard-code timeout settings. This feature adds a resource-timeout parameter in the velero server binary to make it configurable.
 
 #### Add resource list in the output of the restore describe command
 Before this feature, Velero restore didn't have a restored resources list as the Velero backup. It's not convenient for users to learn what is restored. This feature adds the resources list and the handling result of the resources (including created, updated, failed, and skipped).
-
-#### Support JSON format output of backup describe command 
-Before the Velero v1.11 release, users could not choose Velero's backup describe command's output format. The command output format is friendly for human reading, but it's not a structured output, and it's not easy for other programs to get information from it. Velero v1.11 adds a JSON format output for the backup describe command.
 
 #### Refactor controllers with controller-runtime
 In v1.11, Backup Controller and Restore controller are refactored with controller-runtime. Till v1.11, all Velero controllers use the controller-runtime framework.
@@ -88,7 +59,6 @@ To fix CVEs and keep pace with Golang, Velero made changes as follows:
 
 
 ### All Changes
-* Ignore not found error during patching managedFields (#6110, @ywk253100)
 * Modify new scope resource filters name. (#6089, @blackpiglet)
 * Make Velero not exits when EnableCSI is on and CSI snapshot not installed (#6062, @blackpiglet)
 * Restore Services before Clusters (#6057, @ywk253100)
@@ -130,7 +100,7 @@ To fix CVEs and keep pace with Golang, Velero made changes as follows:
 * Enable staticcheck linter. (#5788, @blackpiglet)
 * Set Kopia IgnoreUnknownTypes in ErrorHandlingPolicy to True for ignoring backup unknown file type (#5786, @qiuming-best)
 * Bump up Restic version to 0.15.0  (#5784, @qiuming-best)
-* Add File system backup related matrics to Grafana dashboard
+* Add File system backup related metrics to Grafana dashboard
   - Add metrics backup_warning_total for record of total warnings
   - Add metrics backup_last_status for record of last status of the backup  (#5779, @allenxu404)
 * Design for Handling backup of volumes by resources filters (#5773, @qiuming-best)

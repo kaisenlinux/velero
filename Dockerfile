@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Velero binary build section
-FROM --platform=$BUILDPLATFORM golang:1.20.6-bullseye as velero-builder
+FROM --platform=$BUILDPLATFORM golang:1.20.10-bullseye as velero-builder
 
 ARG GOPROXY
 ARG BIN
@@ -41,10 +41,13 @@ COPY . /go/src/github.com/vmware-tanzu/velero
 RUN mkdir -p /output/usr/bin && \
     export GOARM=$( echo "${GOARM}" | cut -c2-) && \
     go build -o /output/${BIN} \
-    -ldflags "${LDFLAGS}" ${PKG}/cmd/${BIN}
+    -ldflags "${LDFLAGS}" ${PKG}/cmd/${BIN} && \
+    go build -o /output/velero-helper \
+    -ldflags "${LDFLAGS}" ${PKG}/cmd/velero-helper && \
+    go clean -modcache -cache
 
 # Restic binary build section
-FROM --platform=$BUILDPLATFORM golang:1.20.6-bullseye as restic-builder
+FROM --platform=$BUILDPLATFORM golang:1.20.10-bullseye as restic-builder
 
 ARG BIN
 ARG TARGETOS
@@ -52,7 +55,7 @@ ARG TARGETARCH
 ARG TARGETVARIANT
 ARG RESTIC_VERSION
 
-env CGO_ENABLED=0 \
+ENV CGO_ENABLED=0 \
     GO111MODULE=on \
     GOPROXY=${GOPROXY} \
     GOOS=${TARGETOS} \
@@ -63,16 +66,17 @@ COPY . /go/src/github.com/vmware-tanzu/velero
 
 RUN mkdir -p /output/usr/bin && \
     export GOARM=$(echo "${GOARM}" | cut -c2-) && \
-    /go/src/github.com/vmware-tanzu/velero/hack/build-restic.sh
+    /go/src/github.com/vmware-tanzu/velero/hack/build-restic.sh && \
+    go clean -modcache -cache
 
 # Velero image packing section
-FROM gcr.io/distroless/base-nossl-debian11@sha256:9523ef8cf054e23a81e722d231c6f604ab43a03c5b174b5c8386c78c0b6473d0
+FROM paketobuildpacks/run-jammy-tiny:0.2.5
 
-LABEL maintainer="Nolan Brubaker <brubakern@vmware.com>"
+LABEL maintainer="Xun Jiang <jxun@vmware.com>"
 
 COPY --from=velero-builder /output /
 
 COPY --from=restic-builder /output /
 
-USER nonroot:nonroot
+USER cnb:cnb
 

@@ -31,6 +31,7 @@ import (
 
 	"github.com/vmware-tanzu/velero/internal/resourcepolicies"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	veleroclient "github.com/vmware-tanzu/velero/pkg/client"
 	clientset "github.com/vmware-tanzu/velero/pkg/generated/clientset/versioned"
 	"github.com/vmware-tanzu/velero/pkg/label"
 	"github.com/vmware-tanzu/velero/pkg/nodeagent"
@@ -42,13 +43,13 @@ import (
 // Backupper can execute pod volume backups of volumes in a pod.
 type Backupper interface {
 	// BackupPodVolumes backs up all specified volumes in a pod.
-	BackupPodVolumes(backup *velerov1api.Backup, pod *corev1api.Pod, volumesToBackup []string, resPolicies *resourcepolicies.Policies, log logrus.FieldLogger) ([]*velerov1api.PodVolumeBackup, []error)
+	BackupPodVolumes(backup *velerov1api.Backup, pod *corev1api.Pod, volumesToBackup []string, resPolicies *resourcepolicies.Policies, log logrus.FieldLogger) ([]*velerov1api.PodVolumeBackup, *PVCBackupSummary, []error)
 }
 
 type backupper struct {
 	ctx          context.Context
 	repoLocker   *repository.RepoLocker
-	repoEnsurer  *repository.RepositoryEnsurer
+	repoEnsurer  *repository.Ensurer
 	veleroClient clientset.Interface
 	pvcClient    corev1client.PersistentVolumeClaimsGetter
 	pvClient     corev1client.PersistentVolumesGetter
@@ -59,10 +60,49 @@ type backupper struct {
 	resultsLock sync.Mutex
 }
 
+type skippedPVC struct {
+	PVC    *corev1api.PersistentVolumeClaim
+	Reason string
+}
+
+// PVCBackupSummary is a summary for which PVCs are skipped, which are backed up after each execution of the Backupper
+// The scope should be within one pod, so the volume name is the key for the maps
+type PVCBackupSummary struct {
+	Backedup map[string]*corev1api.PersistentVolumeClaim
+	Skipped  map[string]*skippedPVC
+	pvcMap   map[string]*corev1api.PersistentVolumeClaim
+}
+
+func NewPVCBackupSummary() *PVCBackupSummary {
+	return &PVCBackupSummary{
+		Backedup: make(map[string]*corev1api.PersistentVolumeClaim),
+		Skipped:  make(map[string]*skippedPVC),
+		pvcMap:   make(map[string]*corev1api.PersistentVolumeClaim),
+	}
+}
+
+func (pbs *PVCBackupSummary) addBackedup(volumeName string) {
+	if pvc, ok := pbs.pvcMap[volumeName]; ok {
+		pbs.Backedup[volumeName] = pvc
+		delete(pbs.Skipped, volumeName)
+	}
+}
+
+func (pbs *PVCBackupSummary) addSkipped(volumeName string, reason string) {
+	if pvc, ok := pbs.pvcMap[volumeName]; ok {
+		if _, ok2 := pbs.Backedup[volumeName]; !ok2 { // if it's not backed up, add it to skipped
+			pbs.Skipped[volumeName] = &skippedPVC{
+				PVC:    pvc,
+				Reason: reason,
+			}
+		}
+	}
+}
+
 func newBackupper(
 	ctx context.Context,
 	repoLocker *repository.RepoLocker,
-	repoEnsurer *repository.RepositoryEnsurer,
+	repoEnsurer *repository.Ensurer,
 	podVolumeBackupInformer cache.SharedIndexInformer,
 	veleroClient clientset.Interface,
 	pvcClient corev1client.PersistentVolumeClaimsGetter,
@@ -127,35 +167,26 @@ func (b *backupper) getMatchAction(resPolicies *resourcepolicies.Policies, pvc *
 	return nil, errors.Errorf("failed to check resource policies for empty volume")
 }
 
-func (b *backupper) BackupPodVolumes(backup *velerov1api.Backup, pod *corev1api.Pod, volumesToBackup []string, resPolicies *resourcepolicies.Policies, log logrus.FieldLogger) ([]*velerov1api.PodVolumeBackup, []error) {
+func (b *backupper) BackupPodVolumes(backup *velerov1api.Backup, pod *corev1api.Pod, volumesToBackup []string, resPolicies *resourcepolicies.Policies, log logrus.FieldLogger) ([]*velerov1api.PodVolumeBackup, *PVCBackupSummary, []error) {
 	if len(volumesToBackup) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
+	log.Infof("pod %s/%s has volumes to backup: %v", pod.Namespace, pod.Name, volumesToBackup)
 
-	err := kube.IsPodRunning(pod)
+	err := nodeagent.IsRunningInNode(b.ctx, backup.Namespace, pod.Spec.NodeName, b.podClient)
 	if err != nil {
-		for _, volumeName := range volumesToBackup {
-			err = errors.Wrapf(err, "backup for volume %s is skipped", volumeName)
-			log.WithError(err).Warn("Skip pod volume")
-		}
-
-		return nil, nil
-	}
-
-	err = nodeagent.IsRunningInNode(b.ctx, backup.Namespace, pod.Spec.NodeName, b.podClient)
-	if err != nil {
-		return nil, []error{err}
+		return nil, nil, []error{err}
 	}
 
 	repositoryType := getRepositoryType(b.uploaderType)
 	if repositoryType == "" {
 		err := errors.Errorf("empty repository type, uploader %s", b.uploaderType)
-		return nil, []error{err}
+		return nil, nil, []error{err}
 	}
 
 	repo, err := b.repoEnsurer.EnsureRepo(b.ctx, backup.Namespace, pod.Namespace, backup.Spec.StorageLocation, repositoryType)
 	if err != nil {
-		return nil, []error{err}
+		return nil, nil, []error{err}
 	}
 
 	// get a single non-exclusive lock since we'll wait for all individual
@@ -170,20 +201,42 @@ func (b *backupper) BackupPodVolumes(backup *velerov1api.Backup, pod *corev1api.
 	b.resultsLock.Unlock()
 
 	var (
-		errs              []error
-		podVolumeBackups  []*velerov1api.PodVolumeBackup
-		podVolumes        = make(map[string]corev1api.Volume)
-		mountedPodVolumes = sets.String{}
+		errs               []error
+		podVolumeBackups   []*velerov1api.PodVolumeBackup
+		podVolumes         = make(map[string]corev1api.Volume)
+		mountedPodVolumes  = sets.String{}
+		attachedPodDevices = sets.String{}
 	)
+	pvcSummary := NewPVCBackupSummary()
 
-	// put the pod's volumes in a map for efficient lookup below
+	// put the pod's volumes and the PVC associated in maps for efficient lookup below
 	for _, podVolume := range pod.Spec.Volumes {
 		podVolumes[podVolume.Name] = podVolume
+		if podVolume.PersistentVolumeClaim != nil {
+			pvc, err := b.pvcClient.PersistentVolumeClaims(pod.Namespace).Get(context.TODO(), podVolume.PersistentVolumeClaim.ClaimName, metav1.GetOptions{})
+			if err != nil {
+				errs = append(errs, errors.Wrap(err, "error getting persistent volume claim for volume"))
+				continue
+			}
+			pvcSummary.pvcMap[podVolume.Name] = pvc
+		}
+	}
+
+	if err := kube.IsPodRunning(pod); err != nil {
+		for _, volumeName := range volumesToBackup {
+			err := errors.Wrapf(err, "backup for volume %s is skipped", volumeName)
+			log.WithError(err).Warn("Skip pod volume")
+			pvcSummary.addSkipped(volumeName, fmt.Sprintf("the pod the PVC is mounted to, %s/%s, is not running", pod.Namespace, pod.Name))
+		}
+		return nil, pvcSummary, nil
 	}
 
 	for _, container := range pod.Spec.Containers {
 		for _, volumeMount := range container.VolumeMounts {
 			mountedPodVolumes.Insert(volumeMount.Name)
+		}
+		for _, volumeDevice := range container.VolumeDevices {
+			attachedPodDevices.Insert(volumeDevice.Name)
 		}
 	}
 
@@ -194,12 +247,11 @@ func (b *backupper) BackupPodVolumes(backup *velerov1api.Backup, pod *corev1api.
 			log.Warnf("No volume named %s found in pod %s/%s, skipping", volumeName, pod.Namespace, pod.Name)
 			continue
 		}
-
 		var pvc *corev1api.PersistentVolumeClaim
 		if volume.PersistentVolumeClaim != nil {
-			pvc, err = b.pvcClient.PersistentVolumeClaims(pod.Namespace).Get(context.TODO(), volume.PersistentVolumeClaim.ClaimName, metav1.GetOptions{})
-			if err != nil {
-				errs = append(errs, errors.Wrap(err, "error getting persistent volume claim for volume"))
+			pvc, ok = pvcSummary.pvcMap[volumeName]
+			if !ok {
+				// there should have been error happened retrieving the PVC and it's recorded already
 				continue
 			}
 		}
@@ -216,10 +268,21 @@ func (b *backupper) BackupPodVolumes(backup *velerov1api.Backup, pod *corev1api.
 			continue
 		}
 
+		// check if volume is a block volume
+		if attachedPodDevices.Has(volumeName) {
+			msg := fmt.Sprintf("volume %s declared in pod %s/%s is a block volume. Block volumes are not supported for fs backup, skipping",
+				volumeName, pod.Namespace, pod.Name)
+			log.Warn(msg)
+			pvcSummary.addSkipped(volumeName, msg)
+			continue
+		}
+
 		// volumes that are not mounted by any container should not be backed up, because
 		// its directory is not created
 		if !mountedPodVolumes.Has(volumeName) {
-			log.Warnf("Volume %s is declared in pod %s/%s but not mounted by any container, skipping", volumeName, pod.Namespace, pod.Name)
+			msg := fmt.Sprintf("volume %s is declared in pod %s/%s but not mounted by any container, skipping", volumeName, pod.Namespace, pod.Name)
+			log.Warn(msg)
+			pvcSummary.addSkipped(volumeName, msg)
 			continue
 		}
 
@@ -229,15 +292,21 @@ func (b *backupper) BackupPodVolumes(backup *velerov1api.Backup, pod *corev1api.
 				continue
 			} else if action != nil && action.Type == resourcepolicies.Skip {
 				log.Infof("skip backup of volume %s for the matched resource policies", volumeName)
+				pvcSummary.addSkipped(volumeName, "matched action is 'skip' in chosen resource policies")
 				continue
 			}
 		}
 
 		volumeBackup := newPodVolumeBackup(backup, pod, volume, repo.Spec.ResticIdentifier, b.uploaderType, pvc)
-		if volumeBackup, err = b.veleroClient.VeleroV1().PodVolumeBackups(volumeBackup.Namespace).Create(context.TODO(), volumeBackup, metav1.CreateOptions{}); err != nil {
+		// TODO: once backupper is refactored to use controller-runtime, just pass client instead of anonymous func
+		if err := veleroclient.CreateRetryGenerateNameWithFunc(volumeBackup, func() error {
+			_, err := b.veleroClient.VeleroV1().PodVolumeBackups(volumeBackup.Namespace).Create(context.TODO(), volumeBackup, metav1.CreateOptions{})
+			return err
+		}); err != nil {
 			errs = append(errs, err)
 			continue
 		}
+		pvcSummary.addBackedup(volumeName)
 		numVolumeSnapshots++
 	}
 
@@ -262,7 +331,7 @@ ForEachVolume:
 	delete(b.results, resultsKey(pod.Namespace, pod.Name))
 	b.resultsLock.Unlock()
 
-	return podVolumeBackups, errs
+	return podVolumeBackups, pvcSummary, errs
 }
 
 type pvGetter interface {

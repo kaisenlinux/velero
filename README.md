@@ -5,7 +5,9 @@
 
 ## Overview
 
-Velero (formerly Heptio Ark) gives you tools to back up and restore your Kubernetes cluster resources and persistent volumes. You can run Velero with a public cloud platform or on-premises. Velero lets you:
+Velero (formerly Heptio Ark) gives you tools to back up and restore your Kubernetes cluster resources and persistent volumes. You can run Velero with a public cloud platform or on-premises. 
+
+Velero lets you:
 
 * Take backups of your cluster and restore in case of loss.
 * Migrate cluster resources to other clusters.
@@ -18,7 +20,7 @@ Velero consists of:
 
 ## Documentation
 
-[The documentation][29] provides a getting started guide and information about building from source, architecture, extending Velero, and more.
+[The documentation][29] provides a getting started guide and information about building from source, architecture, extending Velero and more.
 
 Please use the version selector at the top of the site to ensure you are using the appropriate documentation for your version of Velero.
 
@@ -40,6 +42,7 @@ The following is a list of the supported Kubernetes versions for each Velero ver
 
 | Velero version | Expected Kubernetes version compatibility | Tested on Kubernetes version           |
 |----------------|-------------------------------------------|----------------------------------------|
+| 1.12           | 1.18-latest                               | 1.25.7, 1.26.5, 1.26.7, and 1.27.3     |
 | 1.11           | 1.18-latest                               | 1.23.10, 1.24.9, 1.25.5, and 1.26.1    |
 | 1.10           | 1.18-latest                               | 1.22.5, 1.23.8, 1.24.6 and 1.25.1      |
 | 1.9            | 1.18-latest                               | 1.20.5, 1.21.2, 1.22.5, 1.23, and 1.24 |

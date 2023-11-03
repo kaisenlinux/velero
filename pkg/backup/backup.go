@@ -354,7 +354,6 @@ func (kb *kubernetesBackupper) BackupWithResolvers(log logrus.FieldLogger,
 	}()
 
 	backedUpGroupResources := map[schema.GroupResource]bool{}
-	totalItems := len(items)
 
 	for i, item := range items {
 		log.WithFields(map[string]interface{}{
@@ -389,7 +388,7 @@ func (kb *kubernetesBackupper) BackupWithResolvers(log logrus.FieldLogger,
 
 		// updated total is computed as "how many items we've backed up so far, plus
 		// how many items we know of that are remaining"
-		totalItems = len(backupRequest.BackedUpItems) + (len(items) - (i + 1))
+		totalItems := len(backupRequest.BackedUpItems) + (len(items) - (i + 1))
 
 		// send a progress update
 		update <- progressUpdate{
@@ -431,8 +430,9 @@ func (kb *kubernetesBackupper) BackupWithResolvers(log logrus.FieldLogger,
 	if err := kube.PatchResource(backupRequest.Backup, updated, kb.kbClient); err != nil {
 		log.WithError(errors.WithStack((err))).Warn("Got error trying to update backup's status.progress")
 	}
+	skippedPVSummary, _ := json.Marshal(backupRequest.SkippedPVTracker.Summary())
+	log.Infof("Summary for skipped PVs: %s", skippedPVSummary)
 	backupRequest.Status.Progress = &velerov1api.BackupProgress{TotalItems: len(backupRequest.BackedUpItems), ItemsBackedUp: len(backupRequest.BackedUpItems)}
-
 	log.WithField("progress", "").Infof("Backed up a total of %d items", len(backupRequest.BackedUpItems))
 
 	return nil
@@ -541,7 +541,6 @@ func (kb *kubernetesBackupper) FinalizeBackup(log logrus.FieldLogger,
 	outBackupFile io.Writer,
 	backupItemActionResolver framework.BackupItemActionResolverV2,
 	asyncBIAOperations []*itemoperation.BackupOperation) error {
-
 	gzw := gzip.NewWriter(outBackupFile)
 	defer gzw.Close()
 	tw := tar.NewWriter(gzw)
@@ -592,16 +591,16 @@ func (kb *kubernetesBackupper) FinalizeBackup(log logrus.FieldLogger,
 	log.WithField("progress", "").Infof("Collected %d items from the async BIA operations PostOperationItems list", len(items))
 
 	itemBackupper := &itemBackupper{
-		backupRequest:   backupRequest,
-		tarWriter:       tw,
-		dynamicFactory:  kb.dynamicFactory,
-		kbClient:        kb.kbClient,
-		discoveryHelper: kb.discoveryHelper,
-		itemHookHandler: &hook.NoOpItemHookHandler{},
+		backupRequest:            backupRequest,
+		tarWriter:                tw,
+		dynamicFactory:           kb.dynamicFactory,
+		kbClient:                 kb.kbClient,
+		discoveryHelper:          kb.discoveryHelper,
+		itemHookHandler:          &hook.NoOpItemHookHandler{},
+		podVolumeSnapshotTracker: newPVCSnapshotTracker(),
 	}
 	updateFiles := make(map[string]FileForArchive)
 	backedUpGroupResources := map[schema.GroupResource]bool{}
-	totalItems := len(items)
 
 	for i, item := range items {
 		log.WithFields(map[string]interface{}{
@@ -636,12 +635,11 @@ func (kb *kubernetesBackupper) FinalizeBackup(log logrus.FieldLogger,
 					updateFiles[itemFile.FilePath] = itemFile
 				}
 			}
-
 		}()
 
 		// updated total is computed as "how many items we've backed up so far, plus
 		// how many items we know of that are remaining"
-		totalItems = len(backupRequest.BackedUpItems) + (len(items) - (i + 1))
+		totalItems := len(backupRequest.BackedUpItems) + (len(items) - (i + 1))
 
 		log.WithFields(map[string]interface{}{
 			"progress":  "",
@@ -652,7 +650,11 @@ func (kb *kubernetesBackupper) FinalizeBackup(log logrus.FieldLogger,
 	}
 
 	// write new tar archive replacing files in original with content updateFiles for matches
-	buildFinalTarball(tr, tw, updateFiles)
+	if err := buildFinalTarball(tr, tw, updateFiles); err != nil {
+		log.Errorf("Error building final tarball: %s", err.Error())
+		return err
+	}
+
 	log.WithField("progress", "").Infof("Updated a total of %d items", len(backupRequest.BackedUpItems))
 
 	return nil
@@ -707,7 +709,6 @@ func buildFinalTarball(tr *tar.Reader, tw *tar.Writer, updateFiles map[string]Fi
 		}
 	}
 	return nil
-
 }
 
 type tarWriter interface {

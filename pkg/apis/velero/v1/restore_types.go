@@ -17,6 +17,7 @@ limitations under the License.
 package v1
 
 import (
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -108,7 +109,7 @@ type RestoreSpec struct {
 	// +optional
 	Hooks RestoreHooks `json:"hooks,omitempty"`
 
-	// ExistingResourcePolicy specifies the restore behavior for the kubernetes resource to be restored
+	// ExistingResourcePolicy specifies the restore behavior for the Kubernetes resource to be restored
 	// +optional
 	// +nullable
 	ExistingResourcePolicy PolicyType `json:"existingResourcePolicy,omitempty"`
@@ -117,6 +118,11 @@ type RestoreSpec struct {
 	// The default value is 1 hour.
 	// +optional
 	ItemOperationTimeout metav1.Duration `json:"itemOperationTimeout,omitempty"`
+
+	// ResourceModifier specifies the reference to JSON resource patches that should be applied to resources before restoration.
+	// +optional
+	// +nullable
+	ResourceModifier *v1.TypedLocalObjectReference `json:"resourceModifier,omitempty"`
 }
 
 // RestoreHooks contains custom behaviors that should be executed during or post restore.

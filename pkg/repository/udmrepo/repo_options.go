@@ -35,13 +35,14 @@ const (
 	GenOptionOwnerName   = "username"
 	GenOptionOwnerDomain = "domainname"
 
-	StoreOptionS3KeyId            = "accessKeyID"
+	StoreOptionS3KeyID            = "accessKeyID"
 	StoreOptionS3Provider         = "providerName"
 	StoreOptionS3SecretKey        = "secretAccessKey"
 	StoreOptionS3Token            = "sessionToken"
 	StoreOptionS3Endpoint         = "endpoint"
-	StoreOptionS3DisableTls       = "doNotUseTLS"
-	StoreOptionS3DisableTlsVerify = "skipTLSVerify"
+	StoreOptionS3DisableTLS       = "doNotUseTLS"
+	StoreOptionS3DisableTLSVerify = "skipTLSVerify"
+	StoreOptionS3CustomCA         = "customCA"
 
 	StoreOptionAzureKey            = "storageKey"
 	StoreOptionAzureDomain         = "storageDomain"

@@ -26,12 +26,12 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
-	. "github.com/vmware-tanzu/velero/test/e2e"
-	. "github.com/vmware-tanzu/velero/test/e2e/util/k8s"
-	. "github.com/vmware-tanzu/velero/test/e2e/util/kibishii"
+	. "github.com/vmware-tanzu/velero/test"
+	. "github.com/vmware-tanzu/velero/test/util/k8s"
+	. "github.com/vmware-tanzu/velero/test/util/kibishii"
 
-	. "github.com/vmware-tanzu/velero/test/e2e/util/providers"
-	. "github.com/vmware-tanzu/velero/test/e2e/util/velero"
+	. "github.com/vmware-tanzu/velero/test/util/providers"
+	. "github.com/vmware-tanzu/velero/test/util/velero"
 )
 
 const (
@@ -74,18 +74,29 @@ func BackupUpgradeRestoreTest(useVolumeSnapshots bool, veleroCLI2Version VeleroC
 		if veleroCfg.VeleroCLI == "" {
 			Skip("VeleroCLI should be provide")
 		}
+		// need to uninstall Velero first in case of the affection of the existing global velero installation
+		if veleroCfg.InstallVelero {
+			By("Uninstall Velero", func() {
+				ctx, ctxCancel := context.WithTimeout(context.Background(), time.Minute*5)
+				defer ctxCancel()
+				Expect(VeleroUninstall(ctx, veleroCfg.VeleroCLI,
+					veleroCfg.VeleroNamespace)).To(Succeed())
+			})
+		}
 	})
 	AfterEach(func() {
 		if !veleroCfg.Debug {
 			By("Clean backups after test", func() {
-				DeleteBackups(context.Background(), *veleroCfg.ClientToInstallVelero)
+				DeleteAllBackups(context.Background(), *veleroCfg.ClientToInstallVelero)
 			})
 			By(fmt.Sprintf("Delete sample workload namespace %s", upgradeNamespace), func() {
 				DeleteNamespace(context.Background(), *veleroCfg.ClientToInstallVelero, upgradeNamespace, true)
 			})
 			if veleroCfg.InstallVelero {
 				By("Uninstall Velero", func() {
-					Expect(VeleroUninstall(context.Background(), veleroCfg.VeleroCLI,
+					ctx, ctxCancel := context.WithTimeout(context.Background(), time.Minute*5)
+					defer ctxCancel()
+					Expect(VeleroUninstall(ctx, veleroCfg.VeleroCLI,
 						veleroCfg.VeleroNamespace)).To(Succeed())
 				})
 			}
@@ -96,7 +107,8 @@ func BackupUpgradeRestoreTest(useVolumeSnapshots bool, veleroCLI2Version VeleroC
 			flag.Parse()
 			UUIDgen, err = uuid.NewRandom()
 			Expect(err).To(Succeed())
-			oneHourTimeout, _ := context.WithTimeout(context.Background(), time.Minute*60)
+			oneHourTimeout, ctxCancel := context.WithTimeout(context.Background(), time.Minute*60)
+			defer ctxCancel()
 			supportUploaderType, err := IsSupportUploaderType(veleroCLI2Version.VeleroVersion)
 			Expect(err).To(Succeed())
 			if veleroCLI2Version.VeleroCLI == "" {
@@ -111,6 +123,7 @@ func BackupUpgradeRestoreTest(useVolumeSnapshots bool, veleroCLI2Version VeleroC
 			veleroCfg.GCFrequency = ""
 			By(fmt.Sprintf("Install the expected old version Velero (%s) for upgrade",
 				veleroCLI2Version.VeleroVersion), func() {
+
 				//Set VeleroImage and RestoreHelperImage to blank
 				//VeleroImage and RestoreHelperImage should be the default value in originalCli
 				tmpCfgForOldVeleroInstall := veleroCfg
@@ -120,6 +133,11 @@ func BackupUpgradeRestoreTest(useVolumeSnapshots bool, veleroCLI2Version VeleroC
 				tmpCfgForOldVeleroInstall.RestoreHelperImage = ""
 				tmpCfgForOldVeleroInstall.Plugins = ""
 				tmpCfgForOldVeleroInstall.UploaderType = ""
+				version, err := GetVeleroVersion(oneHourTimeout, tmpCfgForOldVeleroInstall.VeleroCLI, true)
+				Expect(err).To(Succeed(), "Fail to get Velero version")
+				tmpCfgForOldVeleroInstall.VeleroVersion = version
+				tmpCfgForOldVeleroInstall.UseVolumeSnapshots = useVolumeSnapshots
+
 				if supportUploaderType {
 					tmpCfgForOldVeleroInstall.UseRestic = false
 					tmpCfgForOldVeleroInstall.UseNodeAgent = !useVolumeSnapshots
@@ -128,7 +146,7 @@ func BackupUpgradeRestoreTest(useVolumeSnapshots bool, veleroCLI2Version VeleroC
 					tmpCfgForOldVeleroInstall.UseNodeAgent = false
 				}
 
-				Expect(VeleroInstall(context.Background(), &tmpCfgForOldVeleroInstall)).To(Succeed())
+				Expect(VeleroInstall(context.Background(), &tmpCfgForOldVeleroInstall, false)).To(Succeed())
 				Expect(CheckVeleroVersion(context.Background(), tmpCfgForOldVeleroInstall.VeleroCLI,
 					tmpCfgForOldVeleroInstall.UpgradeFromVeleroVersion)).To(Succeed())
 			})
@@ -180,7 +198,7 @@ func BackupUpgradeRestoreTest(useVolumeSnapshots bool, veleroCLI2Version VeleroC
 				snapshotCheckPoint.NamespaceBackedUp = upgradeNamespace
 				By("Snapshot should be created in cloud object store", func() {
 					snapshotCheckPoint, err := GetSnapshotCheckPoint(*veleroCfg.ClientToInstallVelero, veleroCfg, 2,
-						upgradeNamespace, backupName, KibishiiPodNameList)
+						upgradeNamespace, backupName, KibishiiPVCNameList)
 					Expect(err).NotTo(HaveOccurred(), "Fail to get snapshot checkpoint")
 					Expect(SnapshotsShouldBeCreatedInCloud(veleroCfg.CloudProvider,
 						veleroCfg.CloudCredentialsFile, veleroCfg.BSLBucket,
@@ -215,7 +233,7 @@ func BackupUpgradeRestoreTest(useVolumeSnapshots bool, veleroCLI2Version VeleroC
 				tmpCfg.UseNodeAgent = !useVolumeSnapshots
 				Expect(err).To(Succeed())
 				if supportUploaderType {
-					Expect(VeleroInstall(context.Background(), &tmpCfg)).To(Succeed())
+					Expect(VeleroInstall(context.Background(), &tmpCfg, false)).To(Succeed())
 					Expect(CheckVeleroVersion(context.Background(), tmpCfg.VeleroCLI,
 						tmpCfg.VeleroVersion)).To(Succeed())
 				} else {

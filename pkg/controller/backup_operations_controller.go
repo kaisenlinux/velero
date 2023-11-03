@@ -185,14 +185,15 @@ func (c *backupOperationsReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		operations.ChangesSinceUpdate = true
 	}
 
+	if len(operations.ErrsSinceUpdate) > 0 {
+		backup.Status.Phase = velerov1api.BackupPhaseWaitingForPluginOperationsPartiallyFailed
+	}
+
 	// if stillInProgress is false, backup moves to finalize phase and needs update
 	// if operations.ErrsSinceUpdate is not empty, then backup phase needs to change to
 	// BackupPhaseWaitingForPluginOperationsPartiallyFailed and needs update
 	// If the only changes are incremental progress, then no write is necessary, progress can remain in memory
 	if !stillInProgress {
-		if len(operations.ErrsSinceUpdate) > 0 {
-			backup.Status.Phase = velerov1api.BackupPhaseWaitingForPluginOperationsPartiallyFailed
-		}
 		if backup.Status.Phase == velerov1api.BackupPhaseWaitingForPluginOperations {
 			log.Infof("Marking backup %s Finalizing", backup.Name)
 			backup.Status.Phase = velerov1api.BackupPhaseFinalizing
@@ -215,7 +216,6 @@ func (c *backupOperationsReconciler) updateBackupAndOperationsJSON(
 	operations *itemoperationmap.OperationsForBackup,
 	changes bool,
 	completionChanges bool) error {
-
 	backupScheduleName := backup.GetLabels()[velerov1api.ScheduleNameLabel]
 
 	if len(operations.ErrsSinceUpdate) > 0 {
@@ -229,7 +229,6 @@ func (c *backupOperationsReconciler) updateBackupAndOperationsJSON(
 			backup.Status.Phase == velerov1api.BackupPhasePartiallyFailed ||
 			backup.Status.Phase == velerov1api.BackupPhaseFinalizing ||
 			backup.Status.Phase == velerov1api.BackupPhaseFinalizingPartiallyFailed) {
-
 			c.itemOperationsMap.DeleteOperationsForBackup(backup.Name)
 		} else if changes {
 			c.itemOperationsMap.PutOperationsForBackup(operations, backup.Name)
@@ -245,7 +244,7 @@ func (c *backupOperationsReconciler) updateBackupAndOperationsJSON(
 		// update file store
 		if backupStore != nil {
 			backupJSON := new(bytes.Buffer)
-			if err := encode.EncodeTo(backup, "json", backupJSON); err != nil {
+			if err := encode.To(backup, "json", backupJSON); err != nil {
 				removeIfComplete = false
 				return errors.Wrap(err, "error encoding backup json")
 			}

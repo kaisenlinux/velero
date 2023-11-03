@@ -36,7 +36,6 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/builder"
 	"github.com/vmware-tanzu/velero/pkg/metrics"
 	"github.com/vmware-tanzu/velero/pkg/util/kube"
-	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 )
 
 const (
@@ -151,7 +150,7 @@ func parseCronSchedule(itm *velerov1.Schedule, logger logrus.FieldLogger) (cron.
 		return nil, validationErrors
 	}
 
-	log := logger.WithField("schedule", kubeutil.NamespaceAndName(itm))
+	log := logger.WithField("schedule", kube.NamespaceAndName(itm))
 
 	// adding a recover() around cron.Parse because it panics on empty string and is possible
 	// that it panics under other scenarios as well.
@@ -183,7 +182,7 @@ func parseCronSchedule(itm *velerov1.Schedule, logger logrus.FieldLogger) (cron.
 
 // checkIfBackupInNewOrProgress check whether there are backups created by this schedule still in New or InProgress state
 func (c *scheduleReconciler) checkIfBackupInNewOrProgress(schedule *velerov1.Schedule) bool {
-	log := c.logger.WithField("schedule", kubeutil.NamespaceAndName(schedule))
+	log := c.logger.WithField("schedule", kube.NamespaceAndName(schedule))
 	backupList := &velerov1.BackupList{}
 	options := &client.ListOptions{
 		Namespace: schedule.Namespace,
@@ -200,18 +199,17 @@ func (c *scheduleReconciler) checkIfBackupInNewOrProgress(schedule *velerov1.Sch
 
 	for _, backup := range backupList.Items {
 		if backup.Status.Phase == velerov1.BackupPhaseNew || backup.Status.Phase == velerov1.BackupPhaseInProgress {
+			log.Debugf("%s/%s still has backups that are in InProgress or New...", schedule.Namespace, schedule.Name)
 			return true
 		}
 	}
-
-	log.Debugf("Schedule %s/%s still has backups are in InProgress or New state, skip submitting backup to avoid overlap.", schedule.Namespace, schedule.Name)
 	return false
 }
 
 // ifDue check whether schedule is due to create a new backup.
 func (c *scheduleReconciler) ifDue(schedule *velerov1.Schedule, cronSchedule cron.Schedule) bool {
 	isDue, nextRunTime := getNextRunTime(schedule, cronSchedule, c.clock.Now())
-	log := c.logger.WithField("schedule", kubeutil.NamespaceAndName(schedule))
+	log := c.logger.WithField("schedule", kube.NamespaceAndName(schedule))
 
 	if !isDue {
 		log.WithField("nextRunTime", nextRunTime).Debug("Schedule is not due, skipping")

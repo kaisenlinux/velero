@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"github.com/pkg/errors"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/vmware-tanzu/velero/pkg/util/kube"
@@ -36,13 +37,13 @@ const (
 )
 
 var (
-	DaemonsetNotFound = errors.New("daemonset not found")
+	ErrDaemonSetNotFound = errors.New("daemonset not found")
 )
 
 // IsRunning checks if the node agent daemonset is running properly. If not, return the error found
 func IsRunning(ctx context.Context, kubeClient kubernetes.Interface, namespace string) error {
 	if _, err := kubeClient.AppsV1().DaemonSets(namespace).Get(ctx, daemonSet, metav1.GetOptions{}); apierrors.IsNotFound(err) {
-		return DaemonsetNotFound
+		return ErrDaemonSetNotFound
 	} else if err != nil {
 		return err
 	} else {
@@ -72,4 +73,13 @@ func IsRunningInNode(ctx context.Context, namespace string, nodeName string, pod
 	}
 
 	return errors.Errorf("daemonset pod not found in running state in node %s", nodeName)
+}
+
+func GetPodSpec(ctx context.Context, kubeClient kubernetes.Interface, namespace string) (*v1.PodSpec, error) {
+	ds, err := kubeClient.AppsV1().DaemonSets(namespace).Get(ctx, daemonSet, metav1.GetOptions{})
+	if err != nil {
+		return nil, errors.Wrap(err, "error to get node-agent daemonset")
+	}
+
+	return &ds.Spec.Template.Spec, nil
 }

@@ -28,9 +28,9 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/vmware-tanzu/velero/pkg/kopia"
 	"github.com/vmware-tanzu/velero/pkg/repository/udmrepo"
 	"github.com/vmware-tanzu/velero/pkg/uploader"
-	"github.com/vmware-tanzu/velero/pkg/util/logging"
 
 	"github.com/kopia/kopia/fs"
 	"github.com/kopia/kopia/fs/localfs"
@@ -45,10 +45,12 @@ import (
 
 // All function mainly used to make testing more convenient
 var treeForSourceFunc = policy.TreeForSource
-var applyRetentionPolicyFunc = policy.ApplyRetentionPolicy
 var setPolicyFunc = policy.SetPolicy
 var saveSnapshotFunc = snapshot.SaveSnapshot
 var loadSnapshotFunc = snapshot.LoadSnapshot
+var listSnapshotsFunc = snapshot.ListSnapshots
+var filesystemEntryFunc = snapshotfs.FilesystemEntryFromIDWithPath
+var restoreEntryFunc = restore.Entry
 
 // SnapshotUploader which mainly used for UT test that could overwrite Upload interface
 type SnapshotUploader interface {
@@ -66,22 +68,32 @@ func newOptionalInt(b int) *policy.OptionalInt {
 	return &ob
 }
 
+func newOptionalInt64(b int64) *policy.OptionalInt64 {
+	ob := policy.OptionalInt64(b)
+	return &ob
+}
+
 func newOptionalBool(b bool) *policy.OptionalBool {
 	ob := policy.OptionalBool(b)
 	return &ob
 }
 
-// setupDefaultPolicy set default policy for kopia
-func setupDefaultPolicy(ctx context.Context, rep repo.RepositoryWriter, sourceInfo snapshot.SourceInfo) error {
-	return setPolicyFunc(ctx, rep, sourceInfo, &policy.Policy{
+func getDefaultPolicy() *policy.Policy {
+	return &policy.Policy{
 		RetentionPolicy: policy.RetentionPolicy{
-			KeepLatest: newOptionalInt(math.MaxInt32),
+			KeepLatest:  newOptionalInt(math.MaxInt32),
+			KeepAnnual:  newOptionalInt(math.MaxInt32),
+			KeepDaily:   newOptionalInt(math.MaxInt32),
+			KeepHourly:  newOptionalInt(math.MaxInt32),
+			KeepMonthly: newOptionalInt(math.MaxInt32),
+			KeepWeekly:  newOptionalInt(math.MaxInt32),
 		},
 		CompressionPolicy: policy.CompressionPolicy{
 			CompressorName: "none",
 		},
 		UploadPolicy: policy.UploadPolicy{
-			MaxParallelFileReads: newOptionalInt(runtime.NumCPU()),
+			MaxParallelFileReads:    newOptionalInt(runtime.NumCPU()),
+			ParallelUploadAboveSize: newOptionalInt64(math.MaxInt64),
 		},
 		SchedulingPolicy: policy.SchedulingPolicy{
 			Manual: true,
@@ -89,40 +101,78 @@ func setupDefaultPolicy(ctx context.Context, rep repo.RepositoryWriter, sourceIn
 		ErrorHandlingPolicy: policy.ErrorHandlingPolicy{
 			IgnoreUnknownTypes: newOptionalBool(true),
 		},
-	})
+	}
+}
+
+func setupDefaultPolicy(ctx context.Context, rep repo.RepositoryWriter, sourceInfo snapshot.SourceInfo) (*policy.Tree, error) {
+	// some internal operations from Kopia code retrieves policies from repo directly, so we need to persist the policy to repo
+	err := setPolicyFunc(ctx, rep, sourceInfo, getDefaultPolicy())
+	if err != nil {
+		return nil, errors.Wrap(err, "error to set policy")
+	}
+
+	err = rep.Flush(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "error to flush repo")
+	}
+
+	// retrieve policy from repo
+	policyTree, err := treeForSourceFunc(ctx, rep, sourceInfo)
+	if err != nil {
+		return nil, errors.Wrap(err, "error to retrieve policy")
+	}
+
+	return policyTree, nil
 }
 
 // Backup backup specific sourcePath and update progress
-func Backup(ctx context.Context, fsUploader *snapshotfs.Uploader, repoWriter repo.RepositoryWriter, sourcePath string,
-	parentSnapshot string, log logrus.FieldLogger) (*uploader.SnapshotInfo, bool, error) {
+func Backup(ctx context.Context, fsUploader SnapshotUploader, repoWriter repo.RepositoryWriter, sourcePath string, realSource string,
+	forceFull bool, parentSnapshot string, volMode uploader.PersistentVolumeMode, tags map[string]string, log logrus.FieldLogger) (*uploader.SnapshotInfo, bool, error) {
 	if fsUploader == nil {
 		return nil, false, errors.New("get empty kopia uploader")
 	}
-	dir, err := filepath.Abs(sourcePath)
+	source, err := filepath.Abs(sourcePath)
 	if err != nil {
 		return nil, false, errors.Wrapf(err, "Invalid source path '%s'", sourcePath)
 	}
 
-	// to be consistent with restic when backup empty dir returns one error for upper logic handle
-	dirs, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, false, errors.Wrapf(err, "Unable to read dir in path %s", dir)
-	} else if len(dirs) == 0 {
-		return nil, true, nil
+	if volMode == uploader.PersistentVolumeFilesystem {
+		// to be consistent with restic when backup empty dir returns one error for upper logic handle
+		dirs, err := os.ReadDir(source)
+		if err != nil {
+			return nil, false, errors.Wrapf(err, "Unable to read dir in path %s", source)
+		} else if len(dirs) == 0 {
+			return nil, true, nil
+		}
 	}
+
+	source = filepath.Clean(source)
 
 	sourceInfo := snapshot.SourceInfo{
 		UserName: udmrepo.GetRepoUser(),
 		Host:     udmrepo.GetRepoDomain(),
-		Path:     filepath.Clean(dir),
+		Path:     filepath.Clean(realSource),
 	}
-	rootDir, err := getLocalFSEntry(sourceInfo.Path)
-	if err != nil {
-		return nil, false, errors.Wrap(err, "Unable to get local filesystem entry")
+	if realSource == "" {
+		sourceInfo.Path = source
 	}
 
-	kopiaCtx := logging.SetupKopiaLog(ctx, log)
-	snapID, snapshotSize, err := SnapshotSource(kopiaCtx, repoWriter, fsUploader, sourceInfo, rootDir, parentSnapshot, log, "Kopia Uploader")
+	var sourceEntry fs.Entry
+
+	if volMode == uploader.PersistentVolumeBlock {
+		sourceEntry, err = getLocalBlockEntry(source)
+		if err != nil {
+			return nil, false, errors.Wrap(err, "unable to get local block device entry")
+		}
+	} else {
+		sourceEntry, err = getLocalFSEntry(source)
+		if err != nil {
+			return nil, false, errors.Wrap(err, "unable to get local filesystem entry")
+		}
+	}
+
+	kopiaCtx := kopia.SetupKopiaLog(ctx, log)
+	snapID, snapshotSize, err := SnapshotSource(kopiaCtx, repoWriter, fsUploader, sourceInfo, sourceEntry, forceFull, parentSnapshot, tags, log, "Kopia Uploader")
 	if err != nil {
 		return nil, false, err
 	}
@@ -170,7 +220,9 @@ func SnapshotSource(
 	u SnapshotUploader,
 	sourceInfo snapshot.SourceInfo,
 	rootDir fs.Entry,
+	forceFull bool,
 	parentSnapshot string,
+	snapshotTags map[string]string,
 	log logrus.FieldLogger,
 	description string,
 ) (string, int64, error) {
@@ -178,45 +230,53 @@ func SnapshotSource(
 	snapshotStartTime := time.Now()
 
 	var previous []*snapshot.Manifest
-	if parentSnapshot != "" {
-		mani, err := loadSnapshotFunc(ctx, rep, manifest.ID(parentSnapshot))
-		if err != nil {
-			return "", 0, errors.Wrapf(err, "Failed to load previous snapshot %v from kopia", parentSnapshot)
-		}
+	if !forceFull {
+		if parentSnapshot != "" {
+			log.Infof("Using provided parent snapshot %s", parentSnapshot)
 
-		previous = append(previous, mani)
+			mani, err := loadSnapshotFunc(ctx, rep, manifest.ID(parentSnapshot))
+			if err != nil {
+				return "", 0, errors.Wrapf(err, "Failed to load previous snapshot %v from kopia", parentSnapshot)
+			}
+
+			previous = append(previous, mani)
+		} else {
+			log.Infof("Searching for parent snapshot")
+
+			pre, err := findPreviousSnapshotManifest(ctx, rep, sourceInfo, snapshotTags, nil, log)
+			if err != nil {
+				return "", 0, errors.Wrapf(err, "Failed to find previous kopia snapshot manifests for si %v", sourceInfo)
+			}
+
+			previous = pre
+		}
 	} else {
-		pre, err := findPreviousSnapshotManifest(ctx, rep, sourceInfo, nil)
-		if err != nil {
-			return "", 0, errors.Wrapf(err, "Failed to find previous kopia snapshot manifests for si %v", sourceInfo)
-		}
-
-		previous = pre
+		log.Info("Forcing full snapshot")
 	}
-	var manifest *snapshot.Manifest
-	if err := setupDefaultPolicy(ctx, rep, sourceInfo); err != nil {
+
+	for i := range previous {
+		log.Infof("Using parent snapshot %s, start time %v, end time %v, description %s", previous[i].ID, previous[i].StartTime.ToTime(), previous[i].EndTime.ToTime(), previous[i].Description)
+	}
+
+	policyTree, err := setupDefaultPolicy(ctx, rep, sourceInfo)
+	if err != nil {
 		return "", 0, errors.Wrapf(err, "unable to set policy for si %v", sourceInfo)
 	}
 
-	policyTree, err := treeForSourceFunc(ctx, rep, sourceInfo)
-	if err != nil {
-		return "", 0, errors.Wrapf(err, "unable to create policy getter for si %v", sourceInfo)
-	}
-
-	manifest, err = u.Upload(ctx, rootDir, policyTree, sourceInfo, previous...)
+	manifest, err := u.Upload(ctx, rootDir, policyTree, sourceInfo, previous...)
 	if err != nil {
 		return "", 0, errors.Wrapf(err, "Failed to upload the kopia snapshot for si %v", sourceInfo)
 	}
 
+	manifest.Tags = snapshotTags
+
 	manifest.Description = description
+	manifest.Pins = []string{"velero-pin"}
 
 	if _, err = saveSnapshotFunc(ctx, rep, manifest); err != nil {
 		return "", 0, errors.Wrapf(err, "Failed to save kopia manifest %v", manifest.ID)
 	}
-	_, err = applyRetentionPolicyFunc(ctx, rep, sourceInfo, true)
-	if err != nil {
-		return "", 0, errors.Wrapf(err, "Failed to apply kopia retention policy for si %v", sourceInfo)
-	}
+
 	if err = rep.Flush(ctx); err != nil {
 		return "", 0, errors.Wrapf(err, "Failed to flush kopia repository")
 	}
@@ -231,8 +291,8 @@ func reportSnapshotStatus(manifest *snapshot.Manifest, policyTree *policy.Tree) 
 	var errs []string
 	if ds := manifest.RootEntry.DirSummary; ds != nil {
 		for _, ent := range ds.FailedEntries {
-			policy := policyTree.DefinedPolicy()
-			if !(policy != nil && *policy.ErrorHandlingPolicy.IgnoreUnknownTypes == true && strings.Contains(ent.Error, fs.ErrUnknown.Error())) {
+			policy := policyTree.EffectivePolicy()
+			if !(policy != nil && bool(*policy.ErrorHandlingPolicy.IgnoreUnknownTypes) && strings.Contains(ent.Error, fs.ErrUnknown.Error())) {
 				errs = append(errs, fmt.Sprintf("Error when processing %v: %v", ent.EntryPath, ent.Error))
 			}
 		}
@@ -247,8 +307,8 @@ func reportSnapshotStatus(manifest *snapshot.Manifest, policyTree *policy.Tree) 
 
 // findPreviousSnapshotManifest returns the list of previous snapshots for a given source, including
 // last complete snapshot following it.
-func findPreviousSnapshotManifest(ctx context.Context, rep repo.Repository, sourceInfo snapshot.SourceInfo, noLaterThan *time.Time) ([]*snapshot.Manifest, error) {
-	man, err := snapshot.ListSnapshots(ctx, rep, sourceInfo)
+func findPreviousSnapshotManifest(ctx context.Context, rep repo.Repository, sourceInfo snapshot.SourceInfo, snapshotTags map[string]string, noLaterThan *fs.UTCTimestamp, log logrus.FieldLogger) ([]*snapshot.Manifest, error) {
+	man, err := listSnapshotsFunc(ctx, rep, sourceInfo)
 	if err != nil {
 		return nil, err
 	}
@@ -257,6 +317,26 @@ func findPreviousSnapshotManifest(ctx context.Context, rep repo.Repository, sour
 	var result []*snapshot.Manifest
 
 	for _, p := range man {
+		log.Debugf("Found one snapshot %s, start time %v, incomplete %s, tags %v", p.ID, p.StartTime.ToTime(), p.IncompleteReason, p.Tags)
+
+		requester, found := p.Tags[uploader.SnapshotRequesterTag]
+		if !found {
+			continue
+		}
+
+		if requester != snapshotTags[uploader.SnapshotRequesterTag] {
+			continue
+		}
+
+		uploaderName, found := p.Tags[uploader.SnapshotUploaderTag]
+		if !found {
+			continue
+		}
+
+		if uploaderName != snapshotTags[uploader.SnapshotUploaderTag] {
+			continue
+		}
+
 		if noLaterThan != nil && p.StartTime.After(*noLaterThan) {
 			continue
 		}
@@ -274,12 +354,20 @@ func findPreviousSnapshotManifest(ctx context.Context, rep repo.Repository, sour
 }
 
 // Restore restore specific sourcePath with given snapshotID and update progress
-func Restore(ctx context.Context, rep repo.RepositoryWriter, progress *KopiaProgress, snapshotID, dest string, log logrus.FieldLogger, cancleCh chan struct{}) (int64, int32, error) {
+func Restore(ctx context.Context, rep repo.RepositoryWriter, progress *Progress, snapshotID, dest string, volMode uploader.PersistentVolumeMode,
+	log logrus.FieldLogger, cancleCh chan struct{}) (int64, int32, error) {
 	log.Info("Start to restore...")
 
-	kopiaCtx := logging.SetupKopiaLog(ctx, log)
+	kopiaCtx := kopia.SetupKopiaLog(ctx, log)
 
-	rootEntry, err := snapshotfs.FilesystemEntryFromIDWithPath(kopiaCtx, rep, snapshotID, false)
+	snapshot, err := snapshot.LoadSnapshot(kopiaCtx, rep, manifest.ID(snapshotID))
+	if err != nil {
+		return 0, 0, errors.Wrapf(err, "Unable to load snapshot %v", snapshotID)
+	}
+
+	log.Infof("Restore from snapshot %s, description %s, created time %v, tags %v", snapshotID, snapshot.Description, snapshot.EndTime.ToTime(), snapshot.Tags)
+
+	rootEntry, err := filesystemEntryFunc(kopiaCtx, rep, snapshotID, false)
 	if err != nil {
 		return 0, 0, errors.Wrapf(err, "Unable to get filesystem entry for snapshot %v", snapshotID)
 	}
@@ -289,7 +377,7 @@ func Restore(ctx context.Context, rep repo.RepositoryWriter, progress *KopiaProg
 		return 0, 0, errors.Wrapf(err, "Unable to resolve path %v", dest)
 	}
 
-	output := &restore.FilesystemOutput{
+	fsOutput := &restore.FilesystemOutput{
 		TargetPath:             path,
 		OverwriteDirectories:   true,
 		OverwriteFiles:         true,
@@ -297,7 +385,19 @@ func Restore(ctx context.Context, rep repo.RepositoryWriter, progress *KopiaProg
 		IgnorePermissionErrors: true,
 	}
 
-	stat, err := restore.Entry(kopiaCtx, rep, output, rootEntry, restore.Options{
+	err = fsOutput.Init(ctx)
+	if err != nil {
+		return 0, 0, errors.Wrap(err, "error to init output")
+	}
+
+	var output restore.Output = fsOutput
+	if volMode == uploader.PersistentVolumeBlock {
+		output = &BlockOutput{
+			FilesystemOutput: fsOutput,
+		}
+	}
+
+	stat, err := restoreEntryFunc(kopiaCtx, rep, output, rootEntry, restore.Options{
 		Parallel:               runtime.NumCPU(),
 		RestoreDirEntryAtDepth: math.MaxInt32,
 		Cancel:                 cancleCh,

@@ -22,25 +22,30 @@ import (
 	"flag"
 	"fmt"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/reporters"
 	. "github.com/onsi/gomega"
 
-	. "github.com/vmware-tanzu/velero/test/e2e"
+	. "github.com/vmware-tanzu/velero/test"
 	. "github.com/vmware-tanzu/velero/test/e2e/backup"
 	. "github.com/vmware-tanzu/velero/test/e2e/backups"
 	. "github.com/vmware-tanzu/velero/test/e2e/basic"
+	. "github.com/vmware-tanzu/velero/test/e2e/basic/api-group"
 	. "github.com/vmware-tanzu/velero/test/e2e/basic/resources-check"
 	. "github.com/vmware-tanzu/velero/test/e2e/bsl-mgmt"
 	. "github.com/vmware-tanzu/velero/test/e2e/migration"
 	. "github.com/vmware-tanzu/velero/test/e2e/privilegesmgmt"
 	. "github.com/vmware-tanzu/velero/test/e2e/pv-backup"
 	. "github.com/vmware-tanzu/velero/test/e2e/resource-filtering"
+	. "github.com/vmware-tanzu/velero/test/e2e/resourcemodifiers"
+	. "github.com/vmware-tanzu/velero/test/e2e/resourcepolicies"
 	. "github.com/vmware-tanzu/velero/test/e2e/scale"
 	. "github.com/vmware-tanzu/velero/test/e2e/schedule"
 	. "github.com/vmware-tanzu/velero/test/e2e/upgrade"
-	. "github.com/vmware-tanzu/velero/test/e2e/util/k8s"
+	. "github.com/vmware-tanzu/velero/test/util/k8s"
+	. "github.com/vmware-tanzu/velero/test/util/velero"
 )
 
 func init() {
@@ -63,6 +68,8 @@ func init() {
 	flag.StringVar(&VeleroCfg.VSLConfig, "vsl-config", "", "configuration to use for the volume snapshot location. Format is key1=value1,key2=value2")
 	flag.StringVar(&VeleroCfg.VeleroNamespace, "velero-namespace", "velero", "namespace to install Velero into")
 	flag.BoolVar(&VeleroCfg.InstallVelero, "install-velero", true, "install/uninstall velero during the test.  Optional.")
+	flag.BoolVar(&VeleroCfg.UseNodeAgent, "use-node-agent", true, "whether deploy node agent daemonset velero during the test.  Optional.")
+	flag.BoolVar(&VeleroCfg.UseVolumeSnapshots, "use-volume-snapshots", true, "Whether or not to create snapshot location automatically. Set to false if you do not plan to create volume snapshots via a storage provider.")
 	flag.StringVar(&VeleroCfg.RegistryCredentialFile, "registry-credential-file", "", "file containing credential for the image registry, follows the same format rules as the ~/.docker/config.json file. Optional.")
 	flag.StringVar(&VeleroCfg.KibishiiDirectory, "kibishii-directory", "github.com/vmware-tanzu-experiments/distributed-data-generator/kubernetes/yaml/", "The file directory or URL path to install Kibishii. Optional.")
 	//vmware-tanzu-experiments
@@ -78,11 +85,16 @@ func init() {
 	flag.StringVar(&VeleroCfg.DefaultCluster, "default-cluster", "", "Default cluster context for migration test.")
 	flag.StringVar(&VeleroCfg.StandbyCluster, "standby-cluster", "", "Standby cluster context for migration test.")
 	flag.StringVar(&VeleroCfg.UploaderType, "uploader-type", "", "Identify persistent volume backup uploader.")
-	flag.BoolVar(&VeleroCfg.VeleroServerDebugMode, "velero-server-debug-mode", false, "Identify persistent volume backup uploader.")
-
+	flag.BoolVar(&VeleroCfg.VeleroServerDebugMode, "velero-server-debug-mode", false, "Switch for enabling Velero server log debug level.")
+	flag.BoolVar(&VeleroCfg.SnapshotMoveData, "snapshot-move-data", false, "Install default plugin for data mover.")
+	flag.StringVar(&VeleroCfg.DataMoverPlugin, "data-mover-plugin", "", "Install customized plugin for data mover.")
+	flag.StringVar(&VeleroCfg.StandbyClusterCloudProvider, "standby-cluster-cloud-provider", "", "Cloud provider for standby cluster.")
+	flag.StringVar(&VeleroCfg.StandbyClusterPlugins, "standby-cluster-plugins", "", "Plugins provider for standby cluster.")
+	flag.StringVar(&VeleroCfg.StandbyClusterOjbectStoreProvider, "standby-cluster-object-store-provider", "", "Object store provider for standby cluster.")
+	flag.BoolVar(&VeleroCfg.DebugVeleroPodRestart, "debug-velero-pod-restart", false, "Switch for debugging velero pod restart.")
 }
 
-var _ = Describe("[APIGroup][Common] Velero tests with various CRD API group versions", APIGropuVersionsTest)
+var _ = Describe("[APIGroup][APIVersion] Velero tests with various CRD API group versions", APIGropuVersionsTest)
 var _ = Describe("[APIGroup][APIExtensions] CRD of apiextentions v1beta1 should be B/R successfully from cluster(k8s version < 1.22) to cluster(k8s version >= 1.22)", APIExtensionsVersionsTest)
 
 // Test backup and restore of Kibishi using restic
@@ -109,6 +121,9 @@ var _ = Describe("[ResourceFiltering][IncludeNamespaces][Restore] Velero test on
 var _ = Describe("[ResourceFiltering][IncludeResources][Backup] Velero test on include resources from the cluster backup", BackupWithIncludeResources)
 var _ = Describe("[ResourceFiltering][IncludeResources][Restore] Velero test on include resources from the cluster restore", RestoreWithIncludeResources)
 var _ = Describe("[ResourceFiltering][LabelSelector] Velero test on backup include resources matching the label selector", BackupWithLabelSelector)
+var _ = Describe("[ResourceFiltering][ResourcePolicies] Velero test on skip backup of volume by resource policies", ResourcePoliciesTest)
+
+var _ = Describe("[ResourceModifier][Restore] Velero test on resource modifiers from the cluster restore", ResourceModifiersTest)
 
 var _ = Describe("[Backups][Deletion][Restic] Velero tests of Restic backup deletion", BackupDeletionWithRestic)
 var _ = Describe("[Backups][Deletion][Snapshot] Velero tests of snapshot backup deletion", BackupDeletionWithSnapshots)
@@ -171,7 +186,7 @@ func GetKubeconfigContext() error {
 func TestE2e(t *testing.T) {
 	// Skip running E2E tests when running only "short" tests because:
 	// 1. E2E tests are long running tests involving installation of Velero and performing backup and restore operations.
-	// 2. E2E tests require a kubernetes cluster to install and run velero which further requires more configuration. See above referenced command line flags.
+	// 2. E2E tests require a Kubernetes cluster to install and run velero which further requires more configuration. See above referenced command line flags.
 	if testing.Short() {
 		t.Skip("Skipping E2E tests")
 	}
@@ -186,3 +201,19 @@ func TestE2e(t *testing.T) {
 	junitReporter := reporters.NewJUnitReporter("report.xml")
 	RunSpecsWithDefaultAndCustomReporters(t, "E2e Suite", []Reporter{junitReporter})
 }
+
+var _ = BeforeSuite(func() {
+	if VeleroCfg.InstallVelero {
+		By("Install test resources before testing")
+		Expect(PrepareVelero(context.Background(), "install resource before testing")).To(Succeed())
+	}
+})
+
+var _ = AfterSuite(func() {
+	if VeleroCfg.InstallVelero && !VeleroCfg.Debug {
+		By("release test resources after testing")
+		ctx, ctxCancel := context.WithTimeout(context.Background(), time.Minute*5)
+		defer ctxCancel()
+		Expect(VeleroUninstall(ctx, VeleroCfg.VeleroCLI, VeleroCfg.VeleroNamespace)).To(Succeed())
+	}
+})

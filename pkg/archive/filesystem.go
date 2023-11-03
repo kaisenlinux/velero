@@ -1,5 +1,5 @@
 /*
-Copyright 2020 the Velero contributors.
+Copyright the Velero contributors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -40,9 +40,8 @@ func GetVersionedItemFilePath(rootDir, groupResource, namespace, name, versionPa
 func GetScopeDir(namespace string) string {
 	if namespace == "" {
 		return velerov1api.ClusterScopedDir
-	} else {
-		return velerov1api.NamespaceScopedDir
 	}
+	return velerov1api.NamespaceScopedDir
 }
 
 // Unmarshal reads the specified file, unmarshals the JSON contained within it

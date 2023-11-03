@@ -29,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/pager"
@@ -62,7 +61,6 @@ type kubernetesResource struct {
 // getItemsFromResourceIdentifiers converts ResourceIdentifiers to
 // kubernetesResources
 func (r *itemCollector) getItemsFromResourceIdentifiers(resourceIDs []velero.ResourceIdentifier) []*kubernetesResource {
-
 	grResourceIDsMap := make(map[schema.GroupResource][]velero.ResourceIdentifier)
 	for _, resourceID := range resourceIDs {
 		grResourceIDsMap[resourceID.GroupResource] = append(grResourceIDsMap[resourceID.GroupResource], resourceID)
@@ -198,9 +196,8 @@ func (r *itemCollector) getResourceItems(log logrus.FieldLogger, gv schema.Group
 	log.Info("Getting items for resource")
 
 	var (
-		gvr           = gv.WithResource(resource.Name)
-		gr            = gvr.GroupResource()
-		clusterScoped = !resource.Namespaced
+		gvr = gv.WithResource(resource.Name)
+		gr  = gvr.GroupResource()
 	)
 
 	orders := getOrderedResourcesForType(r.backupRequest.Backup.Spec.OrderedResources, resource.Name)
@@ -226,6 +223,10 @@ func (r *itemCollector) getResourceItems(log logrus.FieldLogger, gv schema.Group
 				},
 			).Infof("Getting item")
 			resourceClient, err := r.dynamicFactory.ClientForGroupVersionResource(gv, resource, resourceID.Namespace)
+			if err != nil {
+				log.WithError(errors.WithStack(err)).Error("Error getting client for resource")
+				continue
+			}
 			unstructured, err := resourceClient.Get(resourceID.Name, metav1.GetOptions{})
 			if err != nil {
 				log.WithError(errors.WithStack(err)).Error("Error getting item")
@@ -270,59 +271,27 @@ func (r *itemCollector) getResourceItems(log logrus.FieldLogger, gv schema.Group
 		}
 	}
 
-	namespacesToList := getNamespacesToList(r.backupRequest.NamespaceIncludesExcludes)
-
-	// Check if we're backing up namespaces for a less-than-full backup.
-	// We enter this block if resource is Namespaces and the namespace list is either empty or contains
-	// an explicit namespace list. (We skip this block if the list contains "" since that indicates
-	// a full-cluster backup
-	if gr == kuberesource.Namespaces && (len(namespacesToList) == 0 || namespacesToList[0] != "") {
+	// Handle namespace resource here.
+	// Namespace are only filtered by namespace include/exclude filters.
+	// Label selectors are not checked.
+	if gr == kuberesource.Namespaces {
 		resourceClient, err := r.dynamicFactory.ClientForGroupVersionResource(gv, resource, "")
 		if err != nil {
 			log.WithError(err).Error("Error getting dynamic client")
-		} else {
-			var labelSelector labels.Selector
-			if r.backupRequest.Spec.LabelSelector != nil {
-				labelSelector, err = metav1.LabelSelectorAsSelector(r.backupRequest.Spec.LabelSelector)
-				if err != nil {
-					// This should never happen...
-					return nil, errors.Wrap(err, "invalid label selector")
-				}
-			}
-
-			var items []*kubernetesResource
-			for _, ns := range namespacesToList {
-				log = log.WithField("namespace", ns)
-				log.Info("Getting namespace")
-				unstructured, err := resourceClient.Get(ns, metav1.GetOptions{})
-				if err != nil {
-					log.WithError(errors.WithStack(err)).Error("Error getting namespace")
-					continue
-				}
-
-				labels := labels.Set(unstructured.GetLabels())
-				if labelSelector != nil && !labelSelector.Matches(labels) {
-					log.Info("Skipping namespace because it does not match the backup's label selector")
-					continue
-				}
-
-				path, err := r.writeToFile(unstructured)
-				if err != nil {
-					log.WithError(err).Error("Error writing item to file")
-					continue
-				}
-
-				items = append(items, &kubernetesResource{
-					groupResource: gr,
-					preferredGVR:  preferredGVR,
-					name:          ns,
-					path:          path,
-				})
-			}
-
-			return items, nil
+			return nil, errors.WithStack(err)
 		}
+		unstructuredList, err := resourceClient.List(metav1.ListOptions{})
+		if err != nil {
+			log.WithError(errors.WithStack(err)).Error("error list namespaces")
+			return nil, errors.WithStack(err)
+		}
+
+		items := r.backupNamespaces(unstructuredList, r.backupRequest.NamespaceIncludesExcludes, gr, preferredGVR, log)
+
+		return items, nil
 	}
+	clusterScoped := !resource.Namespaced
+	namespacesToList := getNamespacesToList(r.backupRequest.NamespaceIncludesExcludes)
 
 	// If we get here, we're backing up something other than namespaces
 	if clusterScoped {
@@ -386,11 +355,6 @@ func (r *itemCollector) getResourceItems(log logrus.FieldLogger, gv schema.Group
 		// Collect items in included Namespaces
 		for i := range unstructuredItems {
 			item := &unstructuredItems[i]
-
-			if gr == kuberesource.Namespaces && !r.backupRequest.NamespaceIncludesExcludes.ShouldInclude(item.GetName()) {
-				log.WithField("name", item.GetName()).Info("Skipping namespace because it's excluded")
-				continue
-			}
 
 			path, err := r.writeToFile(item)
 			if err != nil {
@@ -564,4 +528,31 @@ func (r *itemCollector) listItemsForLabel(unstructuredItems []unstructured.Unstr
 		unstructuredItems = append(unstructuredItems, unstructuredList.Items...)
 	}
 	return unstructuredItems, nil
+}
+
+// backupNamespaces process namespace resource according to namespace filters.
+func (r *itemCollector) backupNamespaces(unstructuredList *unstructured.UnstructuredList,
+	ie *collections.IncludesExcludes, gr schema.GroupResource, preferredGVR schema.GroupVersionResource,
+	log logrus.FieldLogger) []*kubernetesResource {
+	var items []*kubernetesResource
+	for index, unstructured := range unstructuredList.Items {
+		if ie.ShouldInclude(unstructured.GetName()) {
+			log.Debugf("Backup namespace %s due to namespace filters setting.", unstructured.GetName())
+
+			path, err := r.writeToFile(&unstructuredList.Items[index])
+			if err != nil {
+				log.WithError(err).Error("Error writing item to file")
+				continue
+			}
+
+			items = append(items, &kubernetesResource{
+				groupResource: gr,
+				preferredGVR:  preferredGVR,
+				name:          unstructured.GetName(),
+				path:          path,
+			})
+		}
+	}
+
+	return items
 }

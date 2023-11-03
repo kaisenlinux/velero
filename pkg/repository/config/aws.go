@@ -33,8 +33,13 @@ import (
 const (
 	// AWS specific environment variable
 	awsProfileEnvVar         = "AWS_PROFILE"
+	awsRoleEnvVar            = "AWS_ROLE_ARN"
+	awsKeyIDEnvVar           = "AWS_ACCESS_KEY_ID"
+	awsSecretKeyEnvVar       = "AWS_SECRET_ACCESS_KEY"
+	awsSessTokenEnvVar       = "AWS_SESSION_TOKEN"
 	awsProfileKey            = "profile"
 	awsCredentialsFileEnvVar = "AWS_SHARED_CREDENTIALS_FILE"
+	awsConfigFileEnvVar      = "AWS_CONFIG_FILE"
 )
 
 // GetS3ResticEnvVars gets the environment variables that restic
@@ -51,28 +56,46 @@ func GetS3ResticEnvVars(config map[string]string) (map[string]string, error) {
 		result[awsProfileEnvVar] = profile
 	}
 
+	// GetS3ResticEnvVars reads the AWS config, from files and envs
+	// if needed assumes the role and returns the session credentials
+	// setting these variables emulates what would happen for example when using kube2iam
+	if creds, err := GetS3Credentials(config); err == nil && creds != nil {
+		result[awsKeyIDEnvVar] = creds.AccessKeyID
+		result[awsSecretKeyEnvVar] = creds.SecretAccessKey
+		result[awsSessTokenEnvVar] = creds.SessionToken
+		result[awsCredentialsFileEnvVar] = ""
+		result[awsProfileEnvVar] = ""
+		result[awsConfigFileEnvVar] = ""
+	}
+
 	return result, nil
 }
 
 // GetS3Credentials gets the S3 credential values according to the information
 // of the provided config or the system's environment variables
-func GetS3Credentials(config map[string]string) (credentials.Value, error) {
+func GetS3Credentials(config map[string]string) (*credentials.Value, error) {
+	if os.Getenv(awsRoleEnvVar) != "" {
+		return nil, nil
+	}
+
+	opts := session.Options{}
 	credentialsFile := config[CredentialsFileKey]
 	if credentialsFile == "" {
-		credentialsFile = os.Getenv("AWS_SHARED_CREDENTIALS_FILE")
+		credentialsFile = os.Getenv(awsCredentialsFileEnvVar)
+	}
+	if credentialsFile != "" {
+		opts.SharedConfigFiles = append(opts.SharedConfigFiles, credentialsFile)
+		opts.SharedConfigState = session.SharedConfigEnable
 	}
 
-	if credentialsFile == "" {
-		return credentials.Value{}, errors.New("missing credential file")
-	}
-
-	creds := credentials.NewSharedCredentials(credentialsFile, "")
-	credValue, err := creds.Get()
+	sess, err := session.NewSessionWithOptions(opts)
 	if err != nil {
-		return credValue, err
+		return nil, err
 	}
 
-	return credValue, nil
+	creds, err := sess.Config.Credentials.Get()
+
+	return &creds, err
 }
 
 // GetAWSBucketRegion returns the AWS region that a bucket is in, or an error

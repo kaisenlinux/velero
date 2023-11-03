@@ -36,21 +36,25 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
-	clocks "k8s.io/utils/clock"
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	snapshotv1client "github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned"
+
 	"github.com/vmware-tanzu/velero/internal/credentials"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	velerov2alpha1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
 	"github.com/vmware-tanzu/velero/pkg/buildinfo"
 	"github.com/vmware-tanzu/velero/pkg/client"
 	"github.com/vmware-tanzu/velero/pkg/cmd"
 	"github.com/vmware-tanzu/velero/pkg/cmd/util/signals"
 	"github.com/vmware-tanzu/velero/pkg/controller"
 	"github.com/vmware-tanzu/velero/pkg/metrics"
+	"github.com/vmware-tanzu/velero/pkg/repository"
 	"github.com/vmware-tanzu/velero/pkg/util/filesystem"
 	"github.com/vmware-tanzu/velero/pkg/util/logging"
 )
@@ -66,11 +70,25 @@ const (
 	// defaultCredentialsDirectory is the path on disk where credential
 	// files will be written to
 	defaultCredentialsDirectory = "/tmp/credentials"
+
+	defaultResourceTimeout         = 10 * time.Minute
+	defaultDataMoverPrepareTimeout = 30 * time.Minute
 )
+
+type nodeAgentServerConfig struct {
+	metricsAddress          string
+	resourceTimeout         time.Duration
+	dataMoverPrepareTimeout time.Duration
+}
 
 func NewServerCommand(f client.Factory) *cobra.Command {
 	logLevelFlag := logging.LogLevelFlag(logrus.InfoLevel)
 	formatFlag := logging.NewFormatFlag()
+	config := nodeAgentServerConfig{
+		metricsAddress:          defaultMetricsAddress,
+		resourceTimeout:         defaultResourceTimeout,
+		dataMoverPrepareTimeout: defaultDataMoverPrepareTimeout,
+	}
 
 	command := &cobra.Command{
 		Use:    "server",
@@ -85,7 +103,7 @@ func NewServerCommand(f client.Factory) *cobra.Command {
 			logger.Infof("Starting Velero node-agent server %s (%s)", buildinfo.Version, buildinfo.FormattedGitSHA())
 
 			f.SetBasename(fmt.Sprintf("%s-%s", c.Parent().Name(), c.Name()))
-			s, err := newNodeAgentServer(logger, f, defaultMetricsAddress)
+			s, err := newNodeAgentServer(logger, f, config)
 			cmd.CheckError(err)
 
 			s.run()
@@ -94,35 +112,54 @@ func NewServerCommand(f client.Factory) *cobra.Command {
 
 	command.Flags().Var(logLevelFlag, "log-level", fmt.Sprintf("The level at which to log. Valid values are %s.", strings.Join(logLevelFlag.AllowedValues(), ", ")))
 	command.Flags().Var(formatFlag, "log-format", fmt.Sprintf("The format for log output. Valid values are %s.", strings.Join(formatFlag.AllowedValues(), ", ")))
+	command.Flags().DurationVar(&config.resourceTimeout, "resource-timeout", config.resourceTimeout, "How long to wait for resource processes which are not covered by other specific timeout parameters. Default is 10 minutes.")
+	command.Flags().DurationVar(&config.dataMoverPrepareTimeout, "data-mover-prepare-timeout", config.dataMoverPrepareTimeout, "How long to wait for preparing a DataUpload/DataDownload. Default is 30 minutes.")
 
 	return command
 }
 
 type nodeAgentServer struct {
-	logger         logrus.FieldLogger
-	ctx            context.Context
-	cancelFunc     context.CancelFunc
-	fileSystem     filesystem.Interface
-	mgr            manager.Manager
-	metrics        *metrics.ServerMetrics
-	metricsAddress string
-	namespace      string
-	nodeName       string
+	logger            logrus.FieldLogger
+	ctx               context.Context
+	cancelFunc        context.CancelFunc
+	fileSystem        filesystem.Interface
+	mgr               manager.Manager
+	metrics           *metrics.ServerMetrics
+	metricsAddress    string
+	namespace         string
+	nodeName          string
+	config            nodeAgentServerConfig
+	kubeClient        kubernetes.Interface
+	csiSnapshotClient *snapshotv1client.Clientset
 }
 
-func newNodeAgentServer(logger logrus.FieldLogger, factory client.Factory, metricAddress string) (*nodeAgentServer, error) {
+func newNodeAgentServer(logger logrus.FieldLogger, factory client.Factory, config nodeAgentServerConfig) (*nodeAgentServer, error) {
 	ctx, cancelFunc := context.WithCancel(context.Background())
 
 	clientConfig, err := factory.ClientConfig()
 	if err != nil {
+		cancelFunc()
 		return nil, err
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
-	velerov1api.AddToScheme(scheme)
-	v1.AddToScheme(scheme)
-	storagev1api.AddToScheme(scheme)
+	if err := velerov1api.AddToScheme(scheme); err != nil {
+		cancelFunc()
+		return nil, err
+	}
+	if err := velerov2alpha1api.AddToScheme(scheme); err != nil {
+		cancelFunc()
+		return nil, err
+	}
+	if err := v1.AddToScheme(scheme); err != nil {
+		cancelFunc()
+		return nil, err
+	}
+	if err := storagev1api.AddToScheme(scheme); err != nil {
+		cancelFunc()
+		return nil, err
+	}
 
 	nodeName := os.Getenv("NODE_NAME")
 
@@ -132,6 +169,18 @@ func newNodeAgentServer(logger logrus.FieldLogger, factory client.Factory, metri
 			&v1.Pod{}: {
 				Field: fields.Set{"spec.nodeName": nodeName}.AsSelector(),
 			},
+			&velerov1api.PodVolumeBackup{}: {
+				Field: fields.Set{"metadata.namespace": factory.Namespace()}.AsSelector(),
+			},
+			&velerov1api.PodVolumeRestore{}: {
+				Field: fields.Set{"metadata.namespace": factory.Namespace()}.AsSelector(),
+			},
+			&velerov2alpha1api.DataUpload{}: {
+				Field: fields.Set{"metadata.namespace": factory.Namespace()}.AsSelector(),
+			},
+			&velerov2alpha1api.DataDownload{}: {
+				Field: fields.Set{"metadata.namespace": factory.Namespace()}.AsSelector(),
+			},
 		},
 	}
 	mgr, err := ctrl.NewManager(clientConfig, ctrl.Options{
@@ -139,30 +188,35 @@ func newNodeAgentServer(logger logrus.FieldLogger, factory client.Factory, metri
 		NewCache: cache.BuilderWithOptions(cacheOption),
 	})
 	if err != nil {
+		cancelFunc()
 		return nil, err
 	}
 
 	s := &nodeAgentServer{
-		logger:         logger,
-		ctx:            ctx,
-		cancelFunc:     cancelFunc,
-		fileSystem:     filesystem.NewFileSystem(),
-		mgr:            mgr,
-		metricsAddress: metricAddress,
-		namespace:      factory.Namespace(),
-		nodeName:       nodeName,
+		logger:     logger,
+		ctx:        ctx,
+		cancelFunc: cancelFunc,
+		fileSystem: filesystem.NewFileSystem(),
+		mgr:        mgr,
+		config:     config,
+		namespace:  factory.Namespace(),
+		nodeName:   nodeName,
 	}
 
 	// the cache isn't initialized yet when "validatePodVolumesHostPath" is called, the client returned by the manager cannot
 	// be used, so we need the kube client here
-	client, err := factory.KubeClient()
+	s.kubeClient, err = factory.KubeClient()
 	if err != nil {
 		return nil, err
 	}
-	if err := s.validatePodVolumesHostPath(client); err != nil {
+	if err := s.validatePodVolumesHostPath(s.kubeClient); err != nil {
 		return nil, err
 	}
 
+	s.csiSnapshotClient, err = snapshotv1client.NewForConfig(clientConfig)
+	if err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -182,9 +236,9 @@ func (s *nodeAgentServer) run() {
 			s.logger.Fatalf("Failed to start metric server for node agent at [%s]: %v", s.metricsAddress, err)
 		}
 	}()
-	s.metrics = metrics.NewPodVolumeMetrics()
+	s.metrics = metrics.NewNodeMetrics()
 	s.metrics.RegisterAllMetrics()
-	s.metrics.InitPodVolumeMetricsForNode(s.nodeName)
+	s.metrics.InitMetricsForNode(s.nodeName)
 
 	s.markInProgressCRsFailed()
 
@@ -206,22 +260,28 @@ func (s *nodeAgentServer) run() {
 	}
 
 	credentialGetter := &credentials.CredentialGetter{FromFile: credentialFileStore, FromSecret: credSecretStore}
-	pvbReconciler := controller.PodVolumeBackupReconciler{
-		Scheme:           s.mgr.GetScheme(),
-		Client:           s.mgr.GetClient(),
-		Clock:            clocks.RealClock{},
-		Metrics:          s.metrics,
-		CredentialGetter: credentialGetter,
-		NodeName:         s.nodeName,
-		FileSystem:       filesystem.NewFileSystem(),
-		Log:              s.logger,
-	}
+	repoEnsurer := repository.NewEnsurer(s.mgr.GetClient(), s.logger, s.config.resourceTimeout)
+	pvbReconciler := controller.NewPodVolumeBackupReconciler(s.mgr.GetClient(), repoEnsurer,
+		credentialGetter, s.nodeName, s.mgr.GetScheme(), s.metrics, s.logger)
+
 	if err := pvbReconciler.SetupWithManager(s.mgr); err != nil {
 		s.logger.Fatal(err, "unable to create controller", "controller", controller.PodVolumeBackup)
 	}
 
-	if err = controller.NewPodVolumeRestoreReconciler(s.logger, s.mgr.GetClient(), credentialGetter).SetupWithManager(s.mgr); err != nil {
+	if err = controller.NewPodVolumeRestoreReconciler(s.mgr.GetClient(), repoEnsurer, credentialGetter, s.logger).SetupWithManager(s.mgr); err != nil {
 		s.logger.WithError(err).Fatal("Unable to create the pod volume restore controller")
+	}
+
+	dataUploadReconciler := controller.NewDataUploadReconciler(s.mgr.GetClient(), s.kubeClient, s.csiSnapshotClient.SnapshotV1(), repoEnsurer, clock.RealClock{}, credentialGetter, s.nodeName, s.fileSystem, s.config.dataMoverPrepareTimeout, s.logger, s.metrics)
+	s.markDataUploadsCancel(dataUploadReconciler)
+	if err = dataUploadReconciler.SetupWithManager(s.mgr); err != nil {
+		s.logger.WithError(err).Fatal("Unable to create the data upload controller")
+	}
+
+	dataDownloadReconciler := controller.NewDataDownloadReconciler(s.mgr.GetClient(), s.kubeClient, repoEnsurer, credentialGetter, s.nodeName, s.config.dataMoverPrepareTimeout, s.logger, s.metrics)
+	s.markDataDownloadsCancel(dataDownloadReconciler)
+	if err = dataDownloadReconciler.SetupWithManager(s.mgr); err != nil {
+		s.logger.WithError(err).Fatal("Unable to create the data download controller")
 	}
 
 	s.logger.Info("Controllers starting...")
@@ -293,6 +353,68 @@ func (s *nodeAgentServer) markInProgressCRsFailed() {
 	s.markInProgressPVRsFailed(client)
 }
 
+func (s *nodeAgentServer) markDataUploadsCancel(r *controller.DataUploadReconciler) {
+	// the function is called before starting the controller manager, the embedded client isn't ready to use, so create a new one here
+	client, err := ctrlclient.New(s.mgr.GetConfig(), ctrlclient.Options{Scheme: s.mgr.GetScheme()})
+	if err != nil {
+		s.logger.WithError(errors.WithStack(err)).Error("failed to create client")
+		return
+	}
+	if dataUploads, err := r.FindDataUploads(s.ctx, client, s.namespace); err != nil {
+		s.logger.WithError(errors.WithStack(err)).Error("failed to find data uploads")
+	} else {
+		for i := range dataUploads {
+			du := dataUploads[i]
+			if du.Status.Phase == velerov2alpha1api.DataUploadPhaseAccepted ||
+				du.Status.Phase == velerov2alpha1api.DataUploadPhasePrepared ||
+				du.Status.Phase == velerov2alpha1api.DataUploadPhaseInProgress {
+				err = controller.UpdateDataUploadWithRetry(s.ctx, client, types.NamespacedName{Namespace: du.Namespace, Name: du.Name}, s.logger.WithField("dataupload", du.Name),
+					func(dataUpload *velerov2alpha1api.DataUpload) {
+						dataUpload.Spec.Cancel = true
+						dataUpload.Status.Message = fmt.Sprintf("found a dataupload with status %q during the node-agent starting, mark it as cancel", du.Status.Phase)
+					})
+
+				if err != nil {
+					s.logger.WithError(errors.WithStack(err)).Errorf("failed to mark dataupload %q cancel", du.GetName())
+					continue
+				}
+				s.logger.WithField("dataupload", du.GetName()).Warn(du.Status.Message)
+			}
+		}
+	}
+}
+
+func (s *nodeAgentServer) markDataDownloadsCancel(r *controller.DataDownloadReconciler) {
+	// the function is called before starting the controller manager, the embedded client isn't ready to use, so create a new one here
+	client, err := ctrlclient.New(s.mgr.GetConfig(), ctrlclient.Options{Scheme: s.mgr.GetScheme()})
+	if err != nil {
+		s.logger.WithError(errors.WithStack(err)).Error("failed to create client")
+		return
+	}
+	if dataDownloads, err := r.FindDataDownloads(s.ctx, client, s.namespace); err != nil {
+		s.logger.WithError(errors.WithStack(err)).Error("failed to find data downloads")
+	} else {
+		for i := range dataDownloads {
+			dd := dataDownloads[i]
+			if dd.Status.Phase == velerov2alpha1api.DataDownloadPhaseAccepted ||
+				dd.Status.Phase == velerov2alpha1api.DataDownloadPhasePrepared ||
+				dd.Status.Phase == velerov2alpha1api.DataDownloadPhaseInProgress {
+				err = controller.UpdateDataDownloadWithRetry(s.ctx, client, types.NamespacedName{Namespace: dd.Namespace, Name: dd.Name}, s.logger.WithField("datadownload", dd.Name),
+					func(dataDownload *velerov2alpha1api.DataDownload) {
+						dataDownload.Spec.Cancel = true
+						dataDownload.Status.Message = fmt.Sprintf("found a datadownload with status %q during the node-agent starting, mark it as cancel", dd.Status.Phase)
+					})
+
+				if err != nil {
+					s.logger.WithError(errors.WithStack(err)).Errorf("failed to mark datadownload %q cancel", dd.GetName())
+					continue
+				}
+				s.logger.WithField("datadownload", dd.GetName()).Warn(dd.Status.Message)
+			}
+		}
+	}
+}
+
 func (s *nodeAgentServer) markInProgressPVBsFailed(client ctrlclient.Client) {
 	pvbs := &velerov1api.PodVolumeBackupList{}
 	if err := client.List(s.ctx, pvbs, &ctrlclient.MatchingFields{"metadata.namespace": s.namespace}); err != nil {
@@ -309,9 +431,9 @@ func (s *nodeAgentServer) markInProgressPVBsFailed(client ctrlclient.Client) {
 			continue
 		}
 
-		if err := controller.UpdatePVBStatusToFailed(client, s.ctx, &pvbs.Items[i],
+		if err := controller.UpdatePVBStatusToFailed(s.ctx, client, &pvbs.Items[i],
 			fmt.Sprintf("get a podvolumebackup with status %q during the server starting, mark it as %q", velerov1api.PodVolumeBackupPhaseInProgress, velerov1api.PodVolumeBackupPhaseFailed),
-			time.Now()); err != nil {
+			time.Now(), s.logger); err != nil {
 			s.logger.WithError(errors.WithStack(err)).Errorf("failed to patch podvolumebackup %q", pvb.GetName())
 			continue
 		}
@@ -341,13 +463,13 @@ func (s *nodeAgentServer) markInProgressPVRsFailed(client ctrlclient.Client) {
 			continue
 		}
 		if pod.Spec.NodeName != s.nodeName {
-			s.logger.Debugf("the node of pod referenced by podvolumebackup %q is %q, not %q, skip", pvr.GetName(), pod.Spec.NodeName, s.nodeName)
+			s.logger.Debugf("the node of pod referenced by podvolumerestore %q is %q, not %q, skip", pvr.GetName(), pod.Spec.NodeName, s.nodeName)
 			continue
 		}
 
-		if err := controller.UpdatePVRStatusToFailed(client, s.ctx, &pvrs.Items[i],
+		if err := controller.UpdatePVRStatusToFailed(s.ctx, client, &pvrs.Items[i],
 			fmt.Sprintf("get a podvolumerestore with status %q during the server starting, mark it as %q", velerov1api.PodVolumeRestorePhaseInProgress, velerov1api.PodVolumeRestorePhaseFailed),
-			time.Now()); err != nil {
+			time.Now(), s.logger); err != nil {
 			s.logger.WithError(errors.WithStack(err)).Errorf("failed to patch podvolumerestore %q", pvr.GetName())
 			continue
 		}

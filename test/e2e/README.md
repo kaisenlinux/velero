@@ -9,7 +9,7 @@ If you previously ran unit tests using the `go test ./...` command or any of its
 ## Prerequisites
 
 Running the E2E tests expects:
-1. A running kubernetes cluster:
+1. A running Kubernetes cluster:
     1. With DNS and CNI installed.
     1. Compatible with Velero- running Kubernetes v1.10 or later.
     1. With necessary storage drivers/provisioners installed.
@@ -31,7 +31,7 @@ These configuration parameters are expected as values to the following command l
 
 1. `-credentials-file`: File containing credentials for backup and volume provider. Required.
 1. `-bucket`: Name of the object storage bucket where backups from e2e tests should be stored. Required.
-1. `-cloud-provider`: The cloud the tests will be run in.  Appropriate plug-ins will be installed except for kind which requires
+1. `-cloud-provider`: The cloud the tests will be run in.  Appropriate plugins will be installed except for kind which requires
 the object-store-provider to be specified.
 1. `-object-store-provider`: Object store provider to use. Required when kind is the cloud provider.
 1. `-velerocli`: Path to the velero application to use. Optional, by default uses `velero` in the `$PATH`
@@ -110,6 +110,31 @@ The `-focus` flag is passed to ginkgo using the `GINKGO_FOCUS` make variable. Th
 
 ### API clients
 When adding a test, aim to instantiate an API client only once at the beginning of the test. There is a constructor `newTestClient` that facilitates the configuration and instantiation of clients. Also, please use the `kubebuilder` runtime controller client for any new test, as we will phase out usage of `client-go` API clients.
+
+## TestCase frame related
+TestCase frame provide a serials of interface to concatenate one complete e2e test. it's makes the testing be concise and explicit.
+### VeleroBackupRestoreTest interface 
+VeleroBackupRestoreTest interface provided a standard workflow of backup and restore, which makes the whole testing process clearer and code reusability.
+
+For programming conventions, Take ResourcePoliciesCase case for example:
+##### Init
+- It's need first call the base `TestCase` Init function to generate random number as UUIDgen and set one default timeout duration
+- Assigning CaseBaseName variable with a case related prefix, all others variables will follow the prefix
+- Assigning NamespacesTotal variable, and generating namespaces
+- Assigning values to the inner variable for specific case
+- For BackupArgs, as Velero installation is using global Velero configuration, it's NEED to specify the value of the variable snapshot-volumes or default-volumes-to-fs-backup explicitly.
+##### CreateResources
+- It's better to set a global timeout in CreateResources function which is the real beginning of one e2e test
+##### Destroy
+- It only cleans up resources in currently test namespaces, if you wish to clean up all resources including resources created which are not in currently test namespaces, it's better to override base Destroy function
+##### Clean
+- Clean function only clean resources in namespaces which has the prefix CaseBaseName. So the the names of test namespaces should start with prefix of CaseBaseName.
+- If wantting to clean up all resources including resources created which is not in currently test namespaces, it's better to override base Clean function
+#### Velero Installation
+- Velero is installed with global velero config before the E2E test start, so if the case (such as upgrade/migration, etc.) does not want to use the global velero config, it is NEED TO UNINSTALL velero, or the global velero config may affect the current test.
+### TestFunc 
+The TestFunc function concatenate all the flows in a test.
+It will reduce the frequency of velero installation by installing and checking Velero with the global Velero. It's Need to explicit reinstall Velero if the case has specicial configuration, such as API Group test case we need to enable feature EnableCSI.
 
 ### Tips
 Look for the ⛵ emoji printed at the end of each install and uninstall log. There should not be two install/unintall in a row, and there should be tests between an install and an uninstall. 

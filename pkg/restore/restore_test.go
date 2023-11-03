@@ -53,9 +53,6 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/podvolume"
 	uploadermocks "github.com/vmware-tanzu/velero/pkg/podvolume/mocks"
 	"github.com/vmware-tanzu/velero/pkg/test"
-	testutil "github.com/vmware-tanzu/velero/pkg/test"
-	velerotest "github.com/vmware-tanzu/velero/pkg/test"
-	"github.com/vmware-tanzu/velero/pkg/util/kube"
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 	. "github.com/vmware-tanzu/velero/pkg/util/results"
 	"github.com/vmware-tanzu/velero/pkg/volume"
@@ -864,6 +861,7 @@ func TestRestoreItems(t *testing.T) {
 		tarball              io.Reader
 		want                 []*test.APIResource
 		expectedRestoreItems map[itemKey]restoredItemStatus
+		disableInformer      bool
 	}{
 		{
 			name:    "metadata uid/resourceVersion/etc. gets removed",
@@ -1020,6 +1018,26 @@ func TestRestoreItems(t *testing.T) {
 			apiResources: []*test.APIResource{
 				test.Secrets(builder.ForSecret("ns-1", "sa-1").Data(map[string][]byte{"foo": []byte("bar")}).Result()),
 			},
+			disableInformer: true,
+			want: []*test.APIResource{
+				test.Secrets(builder.ForSecret("ns-1", "sa-1").ObjectMeta(builder.WithLabels("velero.io/backup-name", "backup-1", "velero.io/restore-name", "restore-1")).Data(map[string][]byte{"key-1": []byte("value-1")}).Result()),
+			},
+			expectedRestoreItems: map[itemKey]restoredItemStatus{
+				{resource: "v1/Namespace", namespace: "", name: "ns-1"}:  {action: "created", itemExists: true},
+				{resource: "v1/Secret", namespace: "ns-1", name: "sa-1"}: {action: "updated", itemExists: true},
+			},
+		},
+		{
+			name:    "update secret data and labels when secret exists in cluster and is not identical to the backed up one, existing resource policy is update, using informer cache",
+			restore: defaultRestore().ExistingResourcePolicy("update").Result(),
+			backup:  defaultBackup().Result(),
+			tarball: test.NewTarWriter(t).
+				AddItems("secrets", builder.ForSecret("ns-1", "sa-1").Data(map[string][]byte{"key-1": []byte("value-1")}).Result()).
+				Done(),
+			apiResources: []*test.APIResource{
+				test.Secrets(builder.ForSecret("ns-1", "sa-1").Data(map[string][]byte{"foo": []byte("bar")}).Result()),
+			},
+			disableInformer: false,
 			want: []*test.APIResource{
 				test.Secrets(builder.ForSecret("ns-1", "sa-1").ObjectMeta(builder.WithLabels("velero.io/backup-name", "backup-1", "velero.io/restore-name", "restore-1")).Data(map[string][]byte{"key-1": []byte("value-1")}).Result()),
 			},
@@ -1178,13 +1196,14 @@ func TestRestoreItems(t *testing.T) {
 			}
 
 			data := &Request{
-				Log:              h.log,
-				Restore:          tc.restore,
-				Backup:           tc.backup,
-				PodVolumeBackups: nil,
-				VolumeSnapshots:  nil,
-				BackupReader:     tc.tarball,
-				RestoredItems:    map[itemKey]restoredItemStatus{},
+				Log:                  h.log,
+				Restore:              tc.restore,
+				Backup:               tc.backup,
+				PodVolumeBackups:     nil,
+				VolumeSnapshots:      nil,
+				BackupReader:         tc.tarball,
+				RestoredItems:        map[itemKey]restoredItemStatus{},
+				DisableInformerCache: tc.disableInformer,
 			}
 			warnings, errs := h.restorer.Restore(
 				data,
@@ -1398,6 +1417,18 @@ func TestRestoreActionsRunForCorrectItems(t *testing.T) {
 			actions: map[*recordResourcesAction][]string{
 				new(recordResourcesAction).ForNamespace("ns-1").ForResource("persistentvolumeclaims"): nil,
 				new(recordResourcesAction).ForNamespace("ns-2").ForResource("pods"):                   nil,
+			},
+		},
+		{
+			name:    "actions run for datauploads resource",
+			restore: defaultRestore().Result(),
+			backup:  defaultBackup().Result(),
+			tarball: test.NewTarWriter(t).
+				AddItems("datauploads.velero.io", builder.ForDataUpload("velero", "du").Result()).
+				Done(),
+			apiResources: []*test.APIResource{test.DataUploads()},
+			actions: map[*recordResourcesAction][]string{
+				new(recordResourcesAction).ForNamespace("velero").ForResource("datauploads.velero.io"): {"velero/du"},
 			},
 		},
 	}
@@ -3091,21 +3122,21 @@ func TestResetMetadata(t *testing.T) {
 		},
 		{
 			name:        "keep name, namespace, labels, annotations, managedFields, finalizers",
-			obj:         NewTestUnstructured().WithMetadata("name", "namespace", "labels", "annotations", "managedFields", "finalizers").Unstructured,
+			obj:         newTestUnstructured().WithMetadata("name", "namespace", "labels", "annotations", "managedFields", "finalizers").Unstructured,
 			expectedErr: false,
-			expectedRes: NewTestUnstructured().WithMetadata("name", "namespace", "labels", "annotations", "managedFields", "finalizers").Unstructured,
+			expectedRes: newTestUnstructured().WithMetadata("name", "namespace", "labels", "annotations", "managedFields", "finalizers").Unstructured,
 		},
 		{
 			name:        "remove uid, ownerReferences",
-			obj:         NewTestUnstructured().WithMetadata("name", "namespace", "uid", "ownerReferences").Unstructured,
+			obj:         newTestUnstructured().WithMetadata("name", "namespace", "uid", "ownerReferences").Unstructured,
 			expectedErr: false,
-			expectedRes: NewTestUnstructured().WithMetadata("name", "namespace").Unstructured,
+			expectedRes: newTestUnstructured().WithMetadata("name", "namespace").Unstructured,
 		},
 		{
 			name:        "keep status",
-			obj:         NewTestUnstructured().WithMetadata().WithStatus().Unstructured,
+			obj:         newTestUnstructured().WithMetadata().WithStatus().Unstructured,
 			expectedErr: false,
-			expectedRes: NewTestUnstructured().WithMetadata().WithStatus().Unstructured,
+			expectedRes: newTestUnstructured().WithMetadata().WithStatus().Unstructured,
 		},
 	}
 
@@ -3133,8 +3164,8 @@ func TestResetStatus(t *testing.T) {
 		},
 		{
 			name:        "remove status",
-			obj:         NewTestUnstructured().WithMetadata().WithStatus().Unstructured,
-			expectedRes: NewTestUnstructured().WithMetadata().Unstructured,
+			obj:         newTestUnstructured().WithMetadata().WithStatus().Unstructured,
+			expectedRes: newTestUnstructured().WithMetadata().Unstructured,
 		},
 	}
 
@@ -3203,13 +3234,13 @@ func TestIsCompleted(t *testing.T) {
 			groupResource: schema.GroupResource{Group: "", Resource: "namespaces"},
 		},
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			u := testutil.UnstructuredOrDie(test.content)
-			backup, err := isCompleted(u, test.groupResource)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u := test.UnstructuredOrDie(tt.content)
+			backup, err := isCompleted(u, tt.groupResource)
 
-			if assert.Equal(t, test.expectedErr, err != nil) {
-				assert.Equal(t, test.expected, backup)
+			if assert.Equal(t, tt.expectedErr, err != nil) {
+				assert.Equal(t, tt.expected, backup)
 			}
 		})
 	}
@@ -3392,7 +3423,7 @@ func newHarness(t *testing.T) *harness {
 
 	apiServer := test.NewAPIServer(t)
 	log := logrus.StandardLogger()
-	kbClient := velerotest.NewFakeControllerRuntimeClient(t)
+	kbClient := test.NewFakeControllerRuntimeClient(t)
 
 	discoveryHelper, err := discovery.NewHelper(apiServer.DiscoveryClient, log)
 	require.NoError(t, err)
@@ -3405,7 +3436,7 @@ func newHarness(t *testing.T) *harness {
 			namespaceClient:            apiServer.KubeClient.CoreV1().Namespaces(),
 			resourceTerminatingTimeout: time.Minute,
 			logger:                     log,
-			fileSystem:                 testutil.NewFakeFileSystem(),
+			fileSystem:                 test.NewFakeFileSystem(),
 
 			// unsupported
 			podVolumeRestorerFactory: nil,
@@ -3450,30 +3481,30 @@ func Test_resetVolumeBindingInfo(t *testing.T) {
 	}{
 		{
 			name: "PVs that are bound have their binding and dynamic provisioning annotations removed",
-			obj: NewTestUnstructured().WithMetadataField("kind", "persistentVolume").
+			obj: newTestUnstructured().WithMetadataField("kind", "persistentVolume").
 				WithName("pv-1").WithAnnotations(
-				kube.KubeAnnBindCompleted,
-				kube.KubeAnnBoundByController,
-				kube.KubeAnnDynamicallyProvisioned,
+				kubeutil.KubeAnnBindCompleted,
+				kubeutil.KubeAnnBoundByController,
+				kubeutil.KubeAnnDynamicallyProvisioned,
 			).WithSpecField("claimRef", map[string]interface{}{
 				"namespace":       "ns-1",
 				"name":            "pvc-1",
 				"uid":             "abc",
 				"resourceVersion": "1"}).Unstructured,
-			expected: NewTestUnstructured().WithMetadataField("kind", "persistentVolume").
+			expected: newTestUnstructured().WithMetadataField("kind", "persistentVolume").
 				WithName("pv-1").
-				WithAnnotations(kube.KubeAnnDynamicallyProvisioned).
+				WithAnnotations(kubeutil.KubeAnnDynamicallyProvisioned).
 				WithSpecField("claimRef", map[string]interface{}{
 					"namespace": "ns-1", "name": "pvc-1"}).Unstructured,
 		},
 		{
 			name: "PVCs that are bound have their binding annotations removed, but the volume name stays",
-			obj: NewTestUnstructured().WithMetadataField("kind", "persistentVolumeClaim").
+			obj: newTestUnstructured().WithMetadataField("kind", "persistentVolumeClaim").
 				WithName("pvc-1").WithAnnotations(
-				kube.KubeAnnBindCompleted,
-				kube.KubeAnnBoundByController,
+				kubeutil.KubeAnnBindCompleted,
+				kubeutil.KubeAnnBoundByController,
 			).WithSpecField("volumeName", "pv-1").Unstructured,
-			expected: NewTestUnstructured().WithMetadataField("kind", "persistentVolumeClaim").
+			expected: newTestUnstructured().WithMetadataField("kind", "persistentVolumeClaim").
 				WithName("pvc-1").WithAnnotations().
 				WithSpecField("volumeName", "pv-1").Unstructured,
 		},
