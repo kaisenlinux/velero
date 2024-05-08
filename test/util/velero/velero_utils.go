@@ -35,11 +35,9 @@ import (
 
 	"github.com/pkg/errors"
 	"golang.org/x/exp/slices"
-	"k8s.io/apimachinery/pkg/util/wait"
-
-	kbclient "sigs.k8s.io/controller-runtime/pkg/client"
-
 	ver "k8s.io/apimachinery/pkg/util/version"
+	"k8s.io/apimachinery/pkg/util/wait"
+	kbclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	cliinstall "github.com/vmware-tanzu/velero/pkg/cmd/cli/install"
@@ -98,6 +96,13 @@ var pluginsMatrix = map[string]map[string][]string{
 		"gcp":     {"velero/velero-plugin-for-gcp:v1.8.0"},
 		"csi":     {"velero/velero-plugin-for-csi:v0.6.0"},
 	},
+	"v1.13": {
+		"aws":     {"velero/velero-plugin-for-aws:v1.9.0"},
+		"azure":   {"velero/velero-plugin-for-microsoft-azure:v1.9.0"},
+		"vsphere": {"vsphereveleroplugin/velero-plugin-for-vsphere:v1.5.2"},
+		"gcp":     {"velero/velero-plugin-for-gcp:v1.9.0"},
+		"csi":     {"velero/velero-plugin-for-csi:v0.7.0"},
+	},
 	"main": {
 		"aws":       {"velero/velero-plugin-for-aws:main"},
 		"azure":     {"velero/velero-plugin-for-microsoft-azure:main"},
@@ -143,7 +148,7 @@ func getPluginsByVersion(version, cloudProvider, objectStoreProvider, feature st
 		plugins = append(plugins, pluginsForObjectStoreProvider...)
 	}
 
-	if strings.EqualFold(feature, "EnableCSI") {
+	if strings.EqualFold(feature, FeatureCSI) {
 		pluginsForFeature, ok = cloudMap["csi"]
 		if !ok {
 			return nil, errors.Errorf("fail to get CSI plugins by version: %s ", version)
@@ -642,7 +647,7 @@ func getPlugins(ctx context.Context, veleroCfg VeleroConfig) ([]string, error) {
 				return nil, errors.WithMessage(err, "failed to get velero version")
 			}
 		}
-		if veleroCfg.SnapshotMoveData && veleroCfg.DataMoverPlugin == "" {
+		if veleroCfg.SnapshotMoveData && veleroCfg.DataMoverPlugin == "" && !veleroCfg.IsUpgradeTest {
 			needDataMoverPlugin = true
 		}
 		plugins, err = getPluginsByVersion(version, cloudProvider, objectStoreProvider, feature, needDataMoverPlugin)
@@ -1161,7 +1166,7 @@ func SnapshotCRsCountShouldBe(ctx context.Context, namespace, backupName string,
 }
 
 func BackupRepositoriesCountShouldBe(ctx context.Context, veleroNamespace, targetNamespace string, expectedCount int) error {
-	resticArr, err := GetResticRepositories(ctx, veleroNamespace, targetNamespace)
+	resticArr, err := GetRepositories(ctx, veleroNamespace, targetNamespace)
 	if err != nil {
 		return errors.Wrapf(err, "Fail to get BackupRepositories")
 	}
@@ -1172,11 +1177,11 @@ func BackupRepositoriesCountShouldBe(ctx context.Context, veleroNamespace, targe
 	}
 }
 
-func GetResticRepositories(ctx context.Context, veleroNamespace, targetNamespace string) ([]string, error) {
+func GetRepositories(ctx context.Context, veleroNamespace, targetNamespace string) ([]string, error) {
 	cmds := []*common.OsCommandLine{}
 	cmd := &common.OsCommandLine{
 		Cmd:  "kubectl",
-		Args: []string{"get", "-n", veleroNamespace, "BackupRepositories"},
+		Args: []string{"get", "-n", veleroNamespace, "backuprepositories.velero.io"},
 	}
 	cmds = append(cmds, cmd)
 
@@ -1201,7 +1206,7 @@ func GetSnapshotCheckPoint(client TestClient, VeleroCfg VeleroConfig, expectCoun
 	snapshotCheckPoint.ExpectCount = expectCount
 	snapshotCheckPoint.NamespaceBackedUp = namespaceBackedUp
 	snapshotCheckPoint.PodName = KibishiiPVCNameList
-	if VeleroCfg.CloudProvider == "azure" && strings.EqualFold(VeleroCfg.Features, "EnableCSI") {
+	if (VeleroCfg.CloudProvider == "azure" || VeleroCfg.CloudProvider == "aws") && strings.EqualFold(VeleroCfg.Features, FeatureCSI) {
 		snapshotCheckPoint.EnableCSI = true
 		resourceName := "snapshot.storage.k8s.io"
 
@@ -1217,7 +1222,7 @@ func GetSnapshotCheckPoint(client TestClient, VeleroCfg VeleroConfig, expectCoun
 			return snapshotCheckPoint, errors.Wrapf(err, "Fail to get Azure CSI snapshot content")
 		}
 	}
-	fmt.Println(snapshotCheckPoint)
+	fmt.Printf("snapshotCheckPoint: %v \n", snapshotCheckPoint)
 	return snapshotCheckPoint, nil
 }
 
@@ -1562,4 +1567,63 @@ func InstallTestStorageClasses(path string) error {
 		return errors.Wrapf(err, "failed to write content into temp file %s when install storage class", tmpFile.Name())
 	}
 	return InstallStorageClass(ctx, tmpFile.Name())
+}
+
+func GetPvName(ctx context.Context, client TestClient, pvcName, namespace string) (string, error) {
+
+	pvcList, err := GetPvcByPVCName(context.Background(), namespace, pvcName)
+	if err != nil {
+		return "", err
+	}
+
+	if len(pvcList) != 1 {
+		return "", errors.New(fmt.Sprintf("Only 1 PV of PVC %s pod %s should be found under namespace %s", pvcList[0], pvcName, namespace))
+	}
+
+	pvList, err := GetPvByPvc(context.Background(), namespace, pvcList[0])
+	if err != nil {
+		return "", err
+	}
+	if len(pvList) != 1 {
+		return "", errors.New(fmt.Sprintf("Only 1 PV of PVC %s pod %s should be found under namespace %s", pvcList[0], pvcName, namespace))
+	}
+
+	return pvList[0], nil
+
+}
+func DeletePVs(ctx context.Context, client TestClient, pvList []string) error {
+	for _, pv := range pvList {
+		args := []string{"delete", "pv", pv, "--timeout=0s"}
+		fmt.Println(args)
+		err := exec.CommandContext(ctx, "kubectl", args...).Run()
+		if err != nil {
+			return errors.New(fmt.Sprintf("Deleted PV  %s ", pv))
+		}
+	}
+	return nil
+}
+
+func CleanAllRetainedPV(ctx context.Context, client TestClient) {
+
+	pvNameList, err := GetAllPVNames(ctx, client)
+	if err != nil {
+		fmt.Println("fail to list PV")
+	}
+	for _, pv := range pvNameList {
+		args := []string{"patch", "pv", pv, "-p", "{\"spec\":{\"persistentVolumeReclaimPolicy\":\"Delete\"}}"}
+		fmt.Println(args)
+		cmd := exec.CommandContext(ctx, "kubectl", args...)
+		stdout, errMsg, err := veleroexec.RunCommand(cmd)
+		if err != nil {
+			fmt.Printf("fail to patch PV %s reclaim policy to delete: stdout: %s, stderr: %s", pv, stdout, errMsg)
+		}
+
+		args = []string{"delete", "pv", pv, "--timeout=60s"}
+		fmt.Println(args)
+		cmd = exec.CommandContext(ctx, "kubectl", args...)
+		stdout, errMsg, err = veleroexec.RunCommand(cmd)
+		if err != nil {
+			fmt.Printf("fail to delete PV %s reclaim policy to delete: stdout: %s, stderr: %s", pv, stdout, errMsg)
+		}
+	}
 }

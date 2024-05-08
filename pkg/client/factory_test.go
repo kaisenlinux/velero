@@ -112,11 +112,6 @@ func TestFactory(t *testing.T) {
 			assert.Equal(t, test.burst, clientConfig.Burst)
 			strings.Contains(clientConfig.UserAgent, test.baseName)
 
-			client, _ := f.Client()
-			_, e := client.Discovery().ServerGroups()
-			assert.Contains(t, e.Error(), fmt.Sprintf("Get \"%s/api?timeout=", test.expectedHost))
-			assert.NotNil(t, client)
-
 			kubeClient, _ := f.KubeClient()
 			group := kubeClient.NodeV1().RESTClient().APIVersion().Group
 			assert.NotNil(t, kubeClient)
@@ -139,12 +134,12 @@ func TestFactory(t *testing.T) {
 			assert.NotNil(t, dynamicClient)
 
 			kubebuilderClient, e := f.KubebuilderClient()
-			assert.Contains(t, e.Error(), fmt.Sprintf("Get \"%s/api?timeout=", test.expectedHost))
-			assert.Nil(t, kubebuilderClient)
+			assert.Nil(t, e)
+			assert.NotNil(t, kubebuilderClient)
 
 			kbClientWithWatch, e := f.KubebuilderWatchClient()
-			assert.Contains(t, e.Error(), fmt.Sprintf("Get \"%s/api?timeout=", test.expectedHost))
-			assert.Nil(t, kbClientWithWatch)
+			assert.Nil(t, e)
+			assert.NotNil(t, kbClientWithWatch)
 		})
 	}
 }

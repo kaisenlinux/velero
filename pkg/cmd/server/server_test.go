@@ -376,3 +376,46 @@ func Test_markInProgressRestoresFailed(t *testing.T) {
 	require.Nil(t, c.Get(context.Background(), client.ObjectKey{Namespace: "velero", Name: "restore02"}, restore02))
 	assert.Equal(t, velerov1api.RestorePhaseCompleted, restore02.Status.Phase)
 }
+
+func Test_setDefaultBackupLocation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	velerov1api.AddToScheme(scheme)
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithLists(&velerov1api.BackupStorageLocationList{
+			Items: []velerov1api.BackupStorageLocation{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "velero",
+						Name:      "default",
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "velero",
+						Name:      "non-default",
+					},
+				},
+			},
+		}).
+		Build()
+	setDefaultBackupLocation(context.Background(), c, "velero", "default", logrus.New())
+
+	defaultLocation := &velerov1api.BackupStorageLocation{}
+	require.Nil(t, c.Get(context.Background(), client.ObjectKey{Namespace: "velero", Name: "default"}, defaultLocation))
+	assert.True(t, defaultLocation.Spec.Default)
+
+	nonDefaultLocation := &velerov1api.BackupStorageLocation{}
+	require.Nil(t, c.Get(context.Background(), client.ObjectKey{Namespace: "velero", Name: "non-default"}, nonDefaultLocation))
+	assert.False(t, nonDefaultLocation.Spec.Default)
+
+	// no default location specified
+	c = fake.NewClientBuilder().WithScheme(scheme).Build()
+	err := setDefaultBackupLocation(context.Background(), c, "velero", "", logrus.New())
+	assert.NoError(t, err)
+
+	// no default location created
+	err = setDefaultBackupLocation(context.Background(), c, "velero", "default", logrus.New())
+	assert.NoError(t, err)
+}

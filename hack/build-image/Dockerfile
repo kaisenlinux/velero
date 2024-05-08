@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM --platform=linux/amd64 golang:1.20.10-bullseye
+FROM --platform=linux/amd64 golang:1.21.9-bookworm
 
 ARG GOPROXY
 
@@ -56,7 +56,7 @@ RUN wget --quiet https://github.com/goreleaser/goreleaser/releases/download/v1.1
     chmod +x /usr/bin/goreleaser
 
 # get golangci-lint
-RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.51.0
+RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.54.2
 
 # install kubectl
 RUN curl -LO https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl

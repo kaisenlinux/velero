@@ -98,6 +98,7 @@ type CreateOptions struct {
 	AllowPartiallyFailed      flag.OptionalBool
 	ItemOperationTimeout      time.Duration
 	ResourceModifierConfigMap string
+	WriteSparseFiles          flag.OptionalBool
 	client                    kbclient.WithWatch
 }
 
@@ -109,6 +110,7 @@ func NewCreateOptions() *CreateOptions {
 		RestoreVolumes:          flag.NewOptionalBool(nil),
 		PreserveNodePorts:       flag.NewOptionalBool(nil),
 		IncludeClusterResources: flag.NewOptionalBool(nil),
+		WriteSparseFiles:        flag.NewOptionalBool(nil),
 	}
 }
 
@@ -146,6 +148,9 @@ func (o *CreateOptions) BindFlags(flags *pflag.FlagSet) {
 	flags.BoolVarP(&o.Wait, "wait", "w", o.Wait, "Wait for the operation to complete.")
 
 	flags.StringVar(&o.ResourceModifierConfigMap, "resource-modifier-configmap", "", "Reference to the resource modifier configmap that restore will use")
+
+	f = flags.VarPF(&o.WriteSparseFiles, "write-sparse-files", "", "Whether to write sparse files during restoring volumes")
+	f.NoOptDefVal = cmd.TRUE
 }
 
 func (o *CreateOptions) Complete(args []string, f client.Factory) error {
@@ -318,6 +323,9 @@ func (o *CreateOptions) Run(c *cobra.Command, f client.Factory) error {
 			ItemOperationTimeout: metav1.Duration{
 				Duration: o.ItemOperationTimeout,
 			},
+			UploaderConfig: &api.UploaderConfigForRestore{
+				WriteSparseFiles: o.WriteSparseFiles.Value,
+			},
 		},
 	}
 
@@ -346,7 +354,7 @@ func (o *CreateOptions) Run(c *cobra.Command, f client.Factory) error {
 		}
 		restoreInformer := cache.NewSharedInformer(&lw, &api.Restore{}, time.Second)
 
-		restoreInformer.AddEventHandler(
+		_, _ = restoreInformer.AddEventHandler(
 			cache.FilteringResourceEventHandler{
 				FilterFunc: func(obj interface{}) bool {
 					restore, ok := obj.(*api.Restore)

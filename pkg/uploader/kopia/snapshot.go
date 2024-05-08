@@ -28,10 +28,6 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/vmware-tanzu/velero/pkg/kopia"
-	"github.com/vmware-tanzu/velero/pkg/repository/udmrepo"
-	"github.com/vmware-tanzu/velero/pkg/uploader"
-
 	"github.com/kopia/kopia/fs"
 	"github.com/kopia/kopia/fs/localfs"
 	"github.com/kopia/kopia/repo"
@@ -41,9 +37,15 @@ import (
 	"github.com/kopia/kopia/snapshot/restore"
 	"github.com/kopia/kopia/snapshot/snapshotfs"
 	"github.com/pkg/errors"
+
+	"github.com/vmware-tanzu/velero/pkg/kopia"
+	"github.com/vmware-tanzu/velero/pkg/repository/udmrepo"
+	"github.com/vmware-tanzu/velero/pkg/uploader"
+	uploaderutil "github.com/vmware-tanzu/velero/pkg/uploader/util"
 )
 
 // All function mainly used to make testing more convenient
+var applyRetentionPolicyFunc = policy.ApplyRetentionPolicy
 var treeForSourceFunc = policy.TreeForSource
 var setPolicyFunc = policy.SetPolicy
 var saveSnapshotFunc = snapshot.SaveSnapshot
@@ -104,9 +106,21 @@ func getDefaultPolicy() *policy.Policy {
 	}
 }
 
-func setupDefaultPolicy(ctx context.Context, rep repo.RepositoryWriter, sourceInfo snapshot.SourceInfo) (*policy.Tree, error) {
+func setupPolicy(ctx context.Context, rep repo.RepositoryWriter, sourceInfo snapshot.SourceInfo, uploaderCfg map[string]string) (*policy.Tree, error) {
 	// some internal operations from Kopia code retrieves policies from repo directly, so we need to persist the policy to repo
-	err := setPolicyFunc(ctx, rep, sourceInfo, getDefaultPolicy())
+	curPolicy := getDefaultPolicy()
+
+	if len(uploaderCfg) > 0 {
+		parallelUpload, err := uploaderutil.GetParallelFilesUpload(uploaderCfg)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to get uploader config")
+		}
+		if parallelUpload > 0 {
+			curPolicy.UploadPolicy.MaxParallelFileReads = newOptionalInt(parallelUpload)
+		}
+	}
+
+	err := setPolicyFunc(ctx, rep, sourceInfo, curPolicy)
 	if err != nil {
 		return nil, errors.Wrap(err, "error to set policy")
 	}
@@ -127,7 +141,7 @@ func setupDefaultPolicy(ctx context.Context, rep repo.RepositoryWriter, sourceIn
 
 // Backup backup specific sourcePath and update progress
 func Backup(ctx context.Context, fsUploader SnapshotUploader, repoWriter repo.RepositoryWriter, sourcePath string, realSource string,
-	forceFull bool, parentSnapshot string, volMode uploader.PersistentVolumeMode, tags map[string]string, log logrus.FieldLogger) (*uploader.SnapshotInfo, bool, error) {
+	forceFull bool, parentSnapshot string, volMode uploader.PersistentVolumeMode, uploaderCfg map[string]string, tags map[string]string, log logrus.FieldLogger) (*uploader.SnapshotInfo, bool, error) {
 	if fsUploader == nil {
 		return nil, false, errors.New("get empty kopia uploader")
 	}
@@ -172,7 +186,7 @@ func Backup(ctx context.Context, fsUploader SnapshotUploader, repoWriter repo.Re
 	}
 
 	kopiaCtx := kopia.SetupKopiaLog(ctx, log)
-	snapID, snapshotSize, err := SnapshotSource(kopiaCtx, repoWriter, fsUploader, sourceInfo, sourceEntry, forceFull, parentSnapshot, tags, log, "Kopia Uploader")
+	snapID, snapshotSize, err := SnapshotSource(kopiaCtx, repoWriter, fsUploader, sourceInfo, sourceEntry, forceFull, parentSnapshot, tags, uploaderCfg, log, "Kopia Uploader")
 	if err != nil {
 		return nil, false, err
 	}
@@ -223,6 +237,7 @@ func SnapshotSource(
 	forceFull bool,
 	parentSnapshot string,
 	snapshotTags map[string]string,
+	uploaderCfg map[string]string,
 	log logrus.FieldLogger,
 	description string,
 ) (string, int64, error) {
@@ -236,10 +251,10 @@ func SnapshotSource(
 
 			mani, err := loadSnapshotFunc(ctx, rep, manifest.ID(parentSnapshot))
 			if err != nil {
-				return "", 0, errors.Wrapf(err, "Failed to load previous snapshot %v from kopia", parentSnapshot)
+				log.WithError(err).Warnf("Failed to load previous snapshot %v from kopia, fallback to full backup", parentSnapshot)
+			} else {
+				previous = append(previous, mani)
 			}
-
-			previous = append(previous, mani)
 		} else {
 			log.Infof("Searching for parent snapshot")
 
@@ -258,7 +273,7 @@ func SnapshotSource(
 		log.Infof("Using parent snapshot %s, start time %v, end time %v, description %s", previous[i].ID, previous[i].StartTime.ToTime(), previous[i].EndTime.ToTime(), previous[i].Description)
 	}
 
-	policyTree, err := setupDefaultPolicy(ctx, rep, sourceInfo)
+	policyTree, err := setupPolicy(ctx, rep, sourceInfo, uploaderCfg)
 	if err != nil {
 		return "", 0, errors.Wrapf(err, "unable to set policy for si %v", sourceInfo)
 	}
@@ -275,6 +290,11 @@ func SnapshotSource(
 
 	if _, err = saveSnapshotFunc(ctx, rep, manifest); err != nil {
 		return "", 0, errors.Wrapf(err, "Failed to save kopia manifest %v", manifest.ID)
+	}
+
+	_, err = applyRetentionPolicyFunc(ctx, rep, sourceInfo, true)
+	if err != nil {
+		return "", 0, errors.Wrapf(err, "Failed to apply kopia retention policy for si %v", sourceInfo)
 	}
 
 	if err = rep.Flush(ctx); err != nil {
@@ -354,7 +374,7 @@ func findPreviousSnapshotManifest(ctx context.Context, rep repo.Repository, sour
 }
 
 // Restore restore specific sourcePath with given snapshotID and update progress
-func Restore(ctx context.Context, rep repo.RepositoryWriter, progress *Progress, snapshotID, dest string, volMode uploader.PersistentVolumeMode,
+func Restore(ctx context.Context, rep repo.RepositoryWriter, progress *Progress, snapshotID, dest string, volMode uploader.PersistentVolumeMode, uploaderCfg map[string]string,
 	log logrus.FieldLogger, cancleCh chan struct{}) (int64, int32, error) {
 	log.Info("Start to restore...")
 
@@ -384,6 +404,18 @@ func Restore(ctx context.Context, rep repo.RepositoryWriter, progress *Progress,
 		OverwriteSymlinks:      true,
 		IgnorePermissionErrors: true,
 	}
+
+	if len(uploaderCfg) > 0 {
+		writeSparseFiles, err := uploaderutil.GetWriteSparseFiles(uploaderCfg)
+		if err != nil {
+			return 0, 0, errors.Wrap(err, "failed to get uploader config")
+		}
+		if writeSparseFiles {
+			fsOutput.WriteSparseFiles = true
+		}
+	}
+
+	log.Debugf("Restore filesystem output %v", fsOutput)
 
 	err = fsOutput.Init(ctx)
 	if err != nil {

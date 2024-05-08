@@ -21,14 +21,15 @@ import (
 	"flag"
 	"fmt"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/reporters"
 	. "github.com/onsi/gomega"
 	"github.com/pkg/errors"
 
+	"github.com/vmware-tanzu/velero/pkg/cmd/cli/install"
 	. "github.com/vmware-tanzu/velero/test"
-
 	"github.com/vmware-tanzu/velero/test/perf/backup"
 	"github.com/vmware-tanzu/velero/test/perf/basic"
 	"github.com/vmware-tanzu/velero/test/perf/restore"
@@ -39,6 +40,7 @@ import (
 )
 
 func init() {
+	VeleroCfg.Options = install.Options{}
 	flag.StringVar(&VeleroCfg.CloudProvider, "cloud-provider", "", "cloud that Velero will be installed into.  Required.")
 	flag.StringVar(&VeleroCfg.ObjectStoreProvider, "object-store-provider", "", "provider of object store plugin. Required if cloud-provider is kind, otherwise ignored.")
 	flag.StringVar(&VeleroCfg.BSLBucket, "bucket", "", "name of the object storage bucket where backups from e2e tests should be stored. Required.")
@@ -53,9 +55,18 @@ func init() {
 	flag.StringVar(&VeleroCfg.BSLPrefix, "prefix", "", "prefix under which all Velero data should be stored within the bucket. Optional.")
 	flag.StringVar(&VeleroCfg.VSLConfig, "vsl-config", "", "configuration to use for the volume snapshot location. Format is key1=value1,key2=value2")
 	flag.StringVar(&VeleroCfg.VeleroNamespace, "velero-namespace", "velero", "namespace to install Velero into")
-	flag.BoolVar(&VeleroCfg.InstallVelero, "install-velero", true, "install/uninstall velero during the test.  Optional.")
+	flag.BoolVar(&InstallVelero, "install-velero", true, "install/uninstall velero during the test.  Optional.")
 	flag.BoolVar(&VeleroCfg.UseNodeAgent, "use-node-agent", true, "whether deploy node agent daemonset velero during the test.  Optional.")
 	flag.StringVar(&VeleroCfg.RegistryCredentialFile, "registry-credential-file", "", "file containing credential for the image registry, follows the same format rules as the ~/.docker/config.json file. Optional.")
+	flag.StringVar(&VeleroCfg.NodeAgentPodCPULimit, "node-agent-pod-cpu-limit", "4", "CPU limit for node agent pod. Optional.")
+	flag.StringVar(&VeleroCfg.NodeAgentPodMemLimit, "node-agent-pod-mem-limit", "4Gi", "Memory limit for node agent pod. Optional.")
+	flag.StringVar(&VeleroCfg.NodeAgentPodCPURequest, "node-agent-pod-cpu-request", "2", "CPU request for node agent pod. Optional.")
+	flag.StringVar(&VeleroCfg.NodeAgentPodMemRequest, "node-agent-pod-mem-request", "2Gi", "Memory request for node agent pod. Optional.")
+	flag.StringVar(&VeleroCfg.VeleroPodCPULimit, "velero-pod-cpu-limit", "4", "CPU limit for velero pod. Optional.")
+	flag.StringVar(&VeleroCfg.VeleroPodMemLimit, "velero-pod-mem-limit", "4Gi", "Memory limit for velero pod. Optional.")
+	flag.StringVar(&VeleroCfg.VeleroPodCPURequest, "velero-pod-cpu-request", "2", "CPU request for velero pod. Optional.")
+	flag.StringVar(&VeleroCfg.VeleroPodMemRequest, "velero-pod-mem-request", "2Gi", "Memory request for velero pod. Optional.")
+	flag.DurationVar(&VeleroCfg.PodVolumeOperationTimeout, "pod-volume-operation-timeout", 360*time.Minute, "Timeout for pod volume operations. Optional.")
 	//vmware-tanzu-experiments
 	flag.StringVar(&VeleroCfg.Features, "features", "", "Comma-separated list of features to enable for this Velero process.")
 	flag.StringVar(&VeleroCfg.DefaultCluster, "default-cluster-context", "", "Default cluster context for migration test.")
@@ -65,6 +76,8 @@ func init() {
 	flag.StringVar(&VeleroCfg.NFSServerPath, "nfs-server-path", "", "the path of nfs server")
 	flag.StringVar(&VeleroCfg.TestCaseDescribe, "test-case-describe", "velero performance test", "the description for the current test")
 	flag.StringVar(&VeleroCfg.BackupForRestore, "backup-for-restore", "", "the name of backup for restore")
+	flag.BoolVar(&VeleroCfg.DeleteClusterResource, "delete-cluster-resource", false, "delete cluster resource after test")
+	flag.BoolVar(&VeleroCfg.DebugVeleroPodRestart, "debug-velero-pod-restart", false, "Switch for debugging velero pod restart.")
 }
 
 func initConfig() error {
@@ -106,15 +119,15 @@ func TestE2e(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	if VeleroCfg.InstallVelero {
+	if InstallVelero {
 		By("Install test resources before testing BeforeSuite")
-		Expect(PrepareVelero(context.Background(), "install resource before testing")).To(Succeed())
+		Expect(PrepareVelero(context.Background(), "install resource before testing", VeleroCfg)).To(Succeed())
 	}
 })
 
 var _ = AfterSuite(func() {
 	Expect(report.GenerateYamlReport()).To(Succeed())
-	if VeleroCfg.InstallVelero && !VeleroCfg.Debug {
+	if InstallVelero && !VeleroCfg.Debug {
 		By("release test resources after testing")
 		Expect(VeleroUninstall(context.Background(), VeleroCfg.VeleroCLI, VeleroCfg.VeleroNamespace)).To(Succeed())
 	}

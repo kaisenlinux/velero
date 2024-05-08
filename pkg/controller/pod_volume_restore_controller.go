@@ -35,7 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/vmware-tanzu/velero/internal/credentials"
 	veleroapishared "github.com/vmware-tanzu/velero/pkg/apis/velero/shared"
@@ -50,7 +49,7 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/util/filesystem"
 )
 
-func NewPodVolumeRestoreReconciler(client client.Client, ensurer *repository.Ensurer,
+func NewPodVolumeRestoreReconciler(client client.Client, dataPathMgr *datapath.Manager, ensurer *repository.Ensurer,
 	credentialGetter *credentials.CredentialGetter, logger logrus.FieldLogger) *PodVolumeRestoreReconciler {
 	return &PodVolumeRestoreReconciler{
 		Client:            client,
@@ -59,7 +58,7 @@ func NewPodVolumeRestoreReconciler(client client.Client, ensurer *repository.Ens
 		credentialGetter:  credentialGetter,
 		fileSystem:        filesystem.NewFileSystem(),
 		clock:             &clocks.RealClock{},
-		dataPathMgr:       datapath.NewManager(1),
+		dataPathMgr:       dataPathMgr,
 	}
 }
 
@@ -122,7 +121,7 @@ func (c *PodVolumeRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	fsRestore, err := c.dataPathMgr.CreateFileSystemBR(pvr.Name, pVBRRequestor, ctx, c.Client, pvr.Namespace, callbacks, log)
 	if err != nil {
 		if err == datapath.ConcurrentLimitExceed {
-			return ctrl.Result{Requeue: true, RequeueAfter: time.Minute}, nil
+			return ctrl.Result{Requeue: true, RequeueAfter: time.Second * 5}, nil
 		} else {
 			return c.errorOut(ctx, pvr, err, "error to create data path", log)
 		}
@@ -147,7 +146,7 @@ func (c *PodVolumeRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return c.errorOut(ctx, pvr, err, "error to initialize data path", log)
 	}
 
-	if err := fsRestore.StartRestore(pvr.Spec.SnapshotID, volumePath); err != nil {
+	if err := fsRestore.StartRestore(pvr.Spec.SnapshotID, volumePath, pvr.Spec.UploaderSettings); err != nil {
 		return c.errorOut(ctx, pvr, err, "error starting data path restore", log)
 	}
 
@@ -207,11 +206,11 @@ func (c *PodVolumeRestoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// By watching the pods, we can trigger the PVR reconciliation again once the pod is finally scheduled on the node.
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&velerov1api.PodVolumeRestore{}).
-		Watches(&source.Kind{Type: &corev1api.Pod{}}, handler.EnqueueRequestsFromMapFunc(c.findVolumeRestoresForPod)).
+		Watches(&corev1api.Pod{}, handler.EnqueueRequestsFromMapFunc(c.findVolumeRestoresForPod)).
 		Complete(c)
 }
 
-func (c *PodVolumeRestoreReconciler) findVolumeRestoresForPod(pod client.Object) []reconcile.Request {
+func (c *PodVolumeRestoreReconciler) findVolumeRestoresForPod(ctx context.Context, pod client.Object) []reconcile.Request {
 	list := &velerov1api.PodVolumeRestoreList{}
 	options := &client.ListOptions{
 		LabelSelector: labels.Set(map[string]string{
@@ -303,7 +302,7 @@ func (c *PodVolumeRestoreReconciler) OnDataPathCompleted(ctx context.Context, na
 	// Write a done file with name=<restore-uid> into the just-created .velero dir
 	// within the volume. The velero init container on the pod is waiting
 	// for this file to exist in each restored volume before completing.
-	if err := os.WriteFile(filepath.Join(volumePath, ".velero", string(restoreUID)), nil, 0644); err != nil { //nolint:gosec
+	if err := os.WriteFile(filepath.Join(volumePath, ".velero", string(restoreUID)), nil, 0644); err != nil { //nolint:gosec // Internal usage. No need to check.
 		_, _ = c.errorOut(ctx, &pvr, err, "error writing done file", log)
 		return
 	}

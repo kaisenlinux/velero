@@ -21,14 +21,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
-	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
-	snapshotfake "github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned/fake"
-	snapshotinformers "github.com/kubernetes-csi/external-snapshotter/client/v4/informers/externalversions"
+	"github.com/google/go-cmp/cmp"
+	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
@@ -42,6 +42,7 @@ import (
 	testclocks "k8s.io/utils/clock/testing"
 	ctrl "sigs.k8s.io/controller-runtime"
 	kbclient "sigs.k8s.io/controller-runtime/pkg/client"
+	fakeClient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	pkgbackup "github.com/vmware-tanzu/velero/pkg/backup"
@@ -58,6 +59,7 @@ import (
 	biav2 "github.com/vmware-tanzu/velero/pkg/plugin/velero/backupitemaction/v2"
 	velerotest "github.com/vmware-tanzu/velero/pkg/test"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
+	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 	"github.com/vmware-tanzu/velero/pkg/util/logging"
 )
 
@@ -584,6 +586,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 		backupLocation           *velerov1api.BackupStorageLocation
 		defaultVolumesToFsBackup bool
 		defaultSnapshotMoveData  bool
+		enableCSI                bool
 		expectedResult           *velerov1api.Backup
 		backupExists             bool
 		existenceCheckError      error
@@ -1023,6 +1026,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			backup:                   defaultBackup().SnapshotMoveData(true).Result(),
 			backupLocation:           defaultBackupLocation,
 			defaultVolumesToFsBackup: false,
+			enableCSI:                true,
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
@@ -1056,14 +1060,14 @@ func TestProcessBackupCompletions(t *testing.T) {
 					CSIVolumeSnapshotsCompleted: 0,
 				},
 			},
-			volumeSnapshot: builder.ForVolumeSnapshot("velero", "testVS").ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).Result(),
+			volumeSnapshot: builder.ForVolumeSnapshot("velero", "testVS").VolumeSnapshotClass("testClass").Status().BoundVolumeSnapshotContentName("testVSC").RestoreSize("10G").SourcePVC("testPVC").ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).Result(),
 		},
 		{
-			name:   "backup with snapshot data movement set to false when CSI feature is enabled",
-			backup: defaultBackup().SnapshotMoveData(false).Result(),
-			//backup:                   defaultBackup().Result(),
+			name:                     "backup with snapshot data movement set to false when CSI feature is enabled",
+			backup:                   defaultBackup().SnapshotMoveData(false).Result(),
 			backupLocation:           defaultBackupLocation,
 			defaultVolumesToFsBackup: false,
+			enableCSI:                true,
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
@@ -1097,13 +1101,14 @@ func TestProcessBackupCompletions(t *testing.T) {
 					CSIVolumeSnapshotsCompleted: 0,
 				},
 			},
-			volumeSnapshot: builder.ForVolumeSnapshot("velero", "testVS").ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).Result(),
+			volumeSnapshot: builder.ForVolumeSnapshot("velero", "testVS").VolumeSnapshotClass("testClass").Status().BoundVolumeSnapshotContentName("testVSC").RestoreSize("10G").SourcePVC("testPVC").ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).Result(),
 		},
 		{
 			name:                     "backup with snapshot data movement not set when CSI feature is enabled",
 			backup:                   defaultBackup().Result(),
 			backupLocation:           defaultBackupLocation,
 			defaultVolumesToFsBackup: false,
+			enableCSI:                true,
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
@@ -1137,7 +1142,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 					CSIVolumeSnapshotsCompleted: 0,
 				},
 			},
-			volumeSnapshot: builder.ForVolumeSnapshot("velero", "testVS").ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).Result(),
+			volumeSnapshot: builder.ForVolumeSnapshot("velero", "testVS").VolumeSnapshotClass("testClass").Status().BoundVolumeSnapshotContentName("testVSC").RestoreSize("10G").SourcePVC("testPVC").ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).Result(),
 		},
 		{
 			name:                     "backup with snapshot data movement set to true and defaultSnapshotMoveData set to false",
@@ -1178,7 +1183,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 					CSIVolumeSnapshotsCompleted: 0,
 				},
 			},
-			volumeSnapshot: builder.ForVolumeSnapshot("velero", "testVS").ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).Result(),
+			volumeSnapshot: builder.ForVolumeSnapshot("velero", "testVS").VolumeSnapshotClass("testClass").Status().BoundVolumeSnapshotContentName("testVSC").RestoreSize("10G").SourcePVC("testPVC").ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).Result(),
 		},
 		{
 			name:                     "backup with snapshot data movement set to false and defaultSnapshotMoveData set to true",
@@ -1186,6 +1191,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			backupLocation:           defaultBackupLocation,
 			defaultVolumesToFsBackup: false,
 			defaultSnapshotMoveData:  true,
+			enableCSI:                true,
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "Backup",
@@ -1219,7 +1225,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 					CSIVolumeSnapshotsCompleted: 0,
 				},
 			},
-			volumeSnapshot: builder.ForVolumeSnapshot("velero", "testVS").ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).Result(),
+			volumeSnapshot: builder.ForVolumeSnapshot("velero", "testVS").VolumeSnapshotClass("testClass").Status().BoundVolumeSnapshotContentName("testVSC").RestoreSize("10G").SourcePVC("testPVC").ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).Result(),
 		},
 		{
 			name:                     "backup with snapshot data movement not set and defaultSnapshotMoveData set to true",
@@ -1260,35 +1266,43 @@ func TestProcessBackupCompletions(t *testing.T) {
 					CSIVolumeSnapshotsCompleted: 0,
 				},
 			},
-			volumeSnapshot: builder.ForVolumeSnapshot("velero", "testVS").ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).Result(),
+			volumeSnapshot: builder.ForVolumeSnapshot("velero", "testVS").VolumeSnapshotClass("testClass").Status().BoundVolumeSnapshotContentName("testVSC").RestoreSize("10G").SourcePVC("testPVC").ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).Result(),
 		},
 	}
+
+	snapshotHandle := "testSnapshotID"
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			formatFlag := logging.FormatText
 			var (
-				logger         = logging.DefaultLogger(logrus.DebugLevel, formatFlag)
-				pluginManager  = new(pluginmocks.Manager)
-				backupStore    = new(persistencemocks.BackupStore)
-				backupper      = new(fakeBackupper)
-				snapshotClient = snapshotfake.NewSimpleClientset()
-				sharedInformer = snapshotinformers.NewSharedInformerFactory(snapshotClient, 0)
-				snapshotLister = sharedInformer.Snapshot().V1().VolumeSnapshots().Lister()
+				logger           = logging.DefaultLogger(logrus.DebugLevel, formatFlag)
+				pluginManager    = new(pluginmocks.Manager)
+				backupStore      = new(persistencemocks.BackupStore)
+				backupper        = new(fakeBackupper)
+				fakeGlobalClient = velerotest.NewFakeControllerRuntimeClient(t)
 			)
 
 			var fakeClient kbclient.Client
 			// add the test's backup storage location if it's different than the default
 			if test.backupLocation != nil && test.backupLocation != defaultBackupLocation {
-				fakeClient = velerotest.NewFakeControllerRuntimeClient(t, test.backupLocation)
+				fakeClient = velerotest.NewFakeControllerRuntimeClient(t, test.backupLocation,
+					builder.ForVolumeSnapshotClass("testClass").Driver("testDriver").Result(),
+					builder.ForVolumeSnapshotContent("testVSC").ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).VolumeSnapshotClassName("testClass").Status(&snapshotv1api.VolumeSnapshotContentStatus{
+						SnapshotHandle: &snapshotHandle,
+					}).Result(),
+				)
 			} else {
-				fakeClient = velerotest.NewFakeControllerRuntimeClient(t)
+				fakeClient = velerotest.NewFakeControllerRuntimeClient(t,
+					builder.ForVolumeSnapshotClass("testClass").Driver("testDriver").Result(),
+					builder.ForVolumeSnapshotContent("testVSC").ObjectMeta(builder.WithLabels(velerov1api.BackupNameLabel, "backup-1")).VolumeSnapshotClassName("testClass").Status(&snapshotv1api.VolumeSnapshotContentStatus{
+						SnapshotHandle: &snapshotHandle,
+					}).Result(),
+				)
 			}
 
 			if test.volumeSnapshot != nil {
-				snapshotClient.SnapshotV1().VolumeSnapshots(test.volumeSnapshot.Namespace).Create(context.Background(), test.volumeSnapshot, metav1.CreateOptions{})
-				sharedInformer.Snapshot().V1().VolumeSnapshots().Informer().GetStore().Add(test.volumeSnapshot)
-				sharedInformer.WaitForCacheSync(make(chan struct{}))
+				require.NoError(t, fakeGlobalClient.Create(context.TODO(), test.volumeSnapshot))
 			}
 
 			apiServer := velerotest.NewAPIServer(t)
@@ -1322,8 +1336,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 				backupStoreGetter:        NewFakeSingleObjectBackupStoreGetter(backupStore),
 				backupper:                backupper,
 				formatFlag:               formatFlag,
-				volumeSnapshotClient:     snapshotClient,
-				volumeSnapshotLister:     snapshotLister,
+				globalCRClient:           fakeGlobalClient,
 			}
 
 			pluginManager.On("GetBackupItemActionsV2").Return(nil, nil)
@@ -1354,7 +1367,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			require.NoError(t, fakeClient.Create(context.Background(), defaultBackupLocation))
 
 			// Enable CSI feature flag for SnapshotDataMovement test.
-			if strings.Contains(test.name, "backup with snapshot data movement") {
+			if test.enableCSI {
 				features.Enable(velerov1api.CSIFeatureFlag)
 			}
 
@@ -1363,7 +1376,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			assert.Nil(t, err)
 
 			// Disable CSI feature to not impact other test cases.
-			if strings.Contains(test.name, "backup with snapshot data movement") {
+			if test.enableCSI {
 				features.Disable(velerov1api.CSIFeatureFlag)
 			}
 
@@ -1663,5 +1676,65 @@ func Test_getLastSuccessBySchedule(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, getLastSuccessBySchedule(tc.backups))
 		})
+	}
+}
+
+// Unit tests to make sure that the backup's status is updated correctly during reconcile.
+// To clear up confusion whether status can be updated with Patch alone without status writer and not kbClient.Status().Patch()
+func TestPatchResourceWorksWithStatus(t *testing.T) {
+	type args struct {
+		original *velerov1api.Backup
+		updated  *velerov1api.Backup
+	}
+	tests := []struct {
+		name    string
+		args    args
+		wantErr bool
+	}{
+		{
+			name: "patch backup status",
+			args: args{
+				original: defaultBackup().SnapshotMoveData(false).Result(),
+				updated: defaultBackup().SnapshotMoveData(false).WithStatus(velerov1api.BackupStatus{
+					CSIVolumeSnapshotsCompleted: 1,
+				}).Result(),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			error := velerov1api.AddToScheme(scheme)
+			if error != nil {
+				t.Errorf("PatchResource() error = %v", error)
+			}
+			fakeClient := fakeClient.NewClientBuilder().WithScheme(scheme).WithObjects(tt.args.original).Build()
+			fromCluster := &velerov1api.Backup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      tt.args.original.Name,
+					Namespace: tt.args.original.Namespace,
+				},
+			}
+			// check original exists
+			if err := fakeClient.Get(context.Background(), kbclient.ObjectKeyFromObject(tt.args.updated), fromCluster); err != nil {
+				t.Errorf("PatchResource() error = %v", err)
+			}
+			// ignore resourceVersion
+			tt.args.updated.ResourceVersion = fromCluster.ResourceVersion
+			tt.args.original.ResourceVersion = fromCluster.ResourceVersion
+			if err := kubeutil.PatchResource(tt.args.original, tt.args.updated, fakeClient); (err != nil) != tt.wantErr {
+				t.Errorf("PatchResource() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			// check updated exists
+			if err := fakeClient.Get(context.Background(), kbclient.ObjectKeyFromObject(tt.args.updated), fromCluster); err != nil {
+				t.Errorf("PatchResource() error = %v", err)
+			}
+
+			// check fromCluster is equal to updated
+			if !reflect.DeepEqual(fromCluster, tt.args.updated) {
+				t.Error(cmp.Diff(fromCluster, tt.args.updated))
+			}
+		})
+
 	}
 }

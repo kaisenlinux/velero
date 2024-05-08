@@ -42,13 +42,13 @@ func (_m *AsyncBR) Init(ctx context.Context, bslName string, sourceNamespace str
 	return r0
 }
 
-// StartBackup provides a mock function with given fields: source, realSource, parentSnapshot, forceFull, tags
-func (_m *AsyncBR) StartBackup(source datapath.AccessPoint, realSource string, parentSnapshot string, forceFull bool, tags map[string]string) error {
-	ret := _m.Called(source, realSource, parentSnapshot, forceFull, tags)
+// StartBackup provides a mock function with given fields: source, realSource, parentSnapshot, forceFull, tags, dataMoverConfig
+func (_m *AsyncBR) StartBackup(source datapath.AccessPoint, realSource string, parentSnapshot string, forceFull bool, tags map[string]string, dataMoverConfig map[string]string) error {
+	ret := _m.Called(source, realSource, parentSnapshot, forceFull, tags, dataMoverConfig)
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(datapath.AccessPoint, string, string, bool, map[string]string) error); ok {
-		r0 = rf(source, realSource, parentSnapshot, forceFull, tags)
+	if rf, ok := ret.Get(0).(func(datapath.AccessPoint, string, string, bool, map[string]string, map[string]string) error); ok {
+		r0 = rf(source, realSource, parentSnapshot, forceFull, tags, dataMoverConfig)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -56,13 +56,13 @@ func (_m *AsyncBR) StartBackup(source datapath.AccessPoint, realSource string, p
 	return r0
 }
 
-// StartRestore provides a mock function with given fields: snapshotID, target
-func (_m *AsyncBR) StartRestore(snapshotID string, target datapath.AccessPoint) error {
-	ret := _m.Called(snapshotID, target)
+// StartRestore provides a mock function with given fields: snapshotID, target, dataMoverConfig
+func (_m *AsyncBR) StartRestore(snapshotID string, target datapath.AccessPoint, dataMoverConfig map[string]string) error {
+	ret := _m.Called(snapshotID, target, dataMoverConfig)
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(string, datapath.AccessPoint) error); ok {
-		r0 = rf(snapshotID, target)
+	if rf, ok := ret.Get(0).(func(string, datapath.AccessPoint, map[string]string) error); ok {
+		r0 = rf(snapshotID, target, dataMoverConfig)
 	} else {
 		r0 = ret.Error(0)
 	}

@@ -37,7 +37,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/vmware-tanzu/velero/internal/credentials"
 	"github.com/vmware-tanzu/velero/pkg/apis/velero/shared"
@@ -69,7 +68,7 @@ type DataDownloadReconciler struct {
 	metrics           *metrics.ServerMetrics
 }
 
-func NewDataDownloadReconciler(client client.Client, kubeClient kubernetes.Interface,
+func NewDataDownloadReconciler(client client.Client, kubeClient kubernetes.Interface, dataPathMgr *datapath.Manager,
 	repoEnsurer *repository.Ensurer, credentialGetter *credentials.CredentialGetter, nodeName string, preparingTimeout time.Duration, logger logrus.FieldLogger, metrics *metrics.ServerMetrics) *DataDownloadReconciler {
 	return &DataDownloadReconciler{
 		client:            client,
@@ -81,7 +80,7 @@ func NewDataDownloadReconciler(client client.Client, kubeClient kubernetes.Inter
 		nodeName:          nodeName,
 		repositoryEnsurer: repoEnsurer,
 		restoreExposer:    exposer.NewGenericRestoreExposer(kubeClient, logger),
-		dataPathMgr:       datapath.NewManager(1),
+		dataPathMgr:       dataPathMgr,
 		preparingTimeout:  preparingTimeout,
 		metrics:           metrics,
 	}
@@ -131,7 +130,7 @@ func (r *DataDownloadReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				log.Errorf("failed to add finalizer with error %s for %s/%s", err.Error(), dd.Namespace, dd.Name)
 				return ctrl.Result{}, err
 			} else if !succeeded {
-				log.Warnf("failed to add finilizer for %s/%s and will requeue later", dd.Namespace, dd.Name)
+				log.Warnf("failed to add finalizer for %s/%s and will requeue later", dd.Namespace, dd.Name)
 				return ctrl.Result{Requeue: true}, nil
 			}
 		}
@@ -140,7 +139,7 @@ func (r *DataDownloadReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		// to help clear up resources instead of clear them directly in case of some conflict with Expose action
 		if err := UpdateDataDownloadWithRetry(ctx, r.client, req.NamespacedName, log, func(dataDownload *velerov2alpha1api.DataDownload) {
 			dataDownload.Spec.Cancel = true
-			dataDownload.Status.Message = fmt.Sprintf("found a dataupload %s/%s is being deleted, mark it as cancel", dd.Namespace, dd.Name)
+			dataDownload.Status.Message = fmt.Sprintf("found a datadownload %s/%s is being deleted, mark it as cancel", dd.Namespace, dd.Name)
 		}); err != nil {
 			log.Errorf("failed to set cancel flag with error %s for %s/%s", err.Error(), dd.Namespace, dd.Name)
 			return ctrl.Result{}, err
@@ -151,6 +150,7 @@ func (r *DataDownloadReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		log.Info("Data download starting")
 
 		if _, err := r.getTargetPVC(ctx, dd); err != nil {
+			log.WithField("error", err).Debugf("Cannot find target PVC for DataDownload yet. Retry later.")
 			return ctrl.Result{Requeue: true}, nil
 		}
 
@@ -192,7 +192,6 @@ func (r *DataDownloadReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				return r.errorOut(ctx, dd, err, "error to expose snapshot", log)
 			}
 		}
-
 		log.Info("Restore is exposed")
 
 		// we need to get CR again for it may canceled by datadownload controller on other
@@ -205,7 +204,6 @@ func (r *DataDownloadReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			}
 			return ctrl.Result{}, errors.Wrap(err, "getting datadownload")
 		}
-
 		// we need to clean up resources as resources created in Expose it may later than cancel action or prepare time
 		// and need to clean up resources again
 		if isDataDownloadInFinalState(dd) {
@@ -262,12 +260,11 @@ func (r *DataDownloadReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if err != nil {
 			if err == datapath.ConcurrentLimitExceed {
 				log.Info("Data path instance is concurrent limited requeue later")
-				return ctrl.Result{Requeue: true, RequeueAfter: time.Minute}, nil
+				return ctrl.Result{Requeue: true, RequeueAfter: time.Second * 5}, nil
 			} else {
 				return r.errorOut(ctx, dd, err, "error to create data path", log)
 			}
 		}
-
 		// Update status to InProgress
 		original := dd.DeepCopy()
 		dd.Status.Phase = velerov2alpha1api.DataDownloadPhaseInProgress
@@ -287,12 +284,13 @@ func (r *DataDownloadReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	} else if dd.Status.Phase == velerov2alpha1api.DataDownloadPhaseInProgress {
 		log.Info("Data download is in progress")
 		if dd.Spec.Cancel {
+			log.Info("Data download is being canceled")
 			fsRestore := r.dataPathMgr.GetAsyncBR(dd.Name)
 			if fsRestore == nil {
+				r.OnDataDownloadCancelled(ctx, dd.GetNamespace(), dd.GetName())
 				return ctrl.Result{}, nil
 			}
 
-			log.Info("Data download is being canceled")
 			// Update status to Canceling.
 			original := dd.DeepCopy()
 			dd.Status.Phase = velerov2alpha1api.DataDownloadPhaseCanceling
@@ -300,14 +298,13 @@ func (r *DataDownloadReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				log.WithError(err).Error("error updating data download status")
 				return ctrl.Result{}, err
 			}
-
 			fsRestore.Cancel()
 			return ctrl.Result{}, nil
 		}
 
 		return ctrl.Result{}, nil
 	} else {
-		// put the finilizer remove action here for all cr will goes to the final status, we could check finalizer and do remove action in final status
+		// put the finalizer remove action here for all cr will goes to the final status, we could check finalizer and do remove action in final status
 		// instead of intermediate state
 		// remove finalizer no matter whether the cr is being deleted or not for it is no longer needed when internal resources are all cleaned up
 		// also in final status cr won't block the direct delete of the velero namespace
@@ -335,7 +332,7 @@ func (r *DataDownloadReconciler) runCancelableDataPath(ctx context.Context, fsRe
 	}
 	log.WithField("path", path.ByPath).Info("fs init")
 
-	if err := fsRestore.StartRestore(dd.Spec.SnapshotID, path); err != nil {
+	if err := fsRestore.StartRestore(dd.Spec.SnapshotID, path, dd.Spec.DataMoverConfig); err != nil {
 		return r.errorOut(ctx, dd, err, fmt.Sprintf("error starting data path %s restore", path.ByPath), log)
 	}
 
@@ -478,17 +475,13 @@ func (r *DataDownloadReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&velerov2alpha1api.DataDownload{}).
-		Watches(s, nil, builder.WithPredicates(gp)).
-		Watches(&source.Kind{Type: &v1.Pod{}}, kube.EnqueueRequestsFromMapUpdateFunc(r.findSnapshotRestoreForPod),
+		WatchesRawSource(s, nil, builder.WithPredicates(gp)).
+		Watches(&v1.Pod{}, kube.EnqueueRequestsFromMapUpdateFunc(r.findSnapshotRestoreForPod),
 			builder.WithPredicates(predicate.Funcs{
 				UpdateFunc: func(ue event.UpdateEvent) bool {
 					newObj := ue.ObjectNew.(*v1.Pod)
 
 					if _, ok := newObj.Labels[velerov1api.DataDownloadLabel]; !ok {
-						return false
-					}
-
-					if newObj.Status.Phase != v1.PodRunning {
 						return false
 					}
 
@@ -511,45 +504,57 @@ func (r *DataDownloadReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *DataDownloadReconciler) findSnapshotRestoreForPod(podObj client.Object) []reconcile.Request {
+func (r *DataDownloadReconciler) findSnapshotRestoreForPod(ctx context.Context, podObj client.Object) []reconcile.Request {
 	pod := podObj.(*v1.Pod)
-
 	dd, err := findDataDownloadByPod(r.client, *pod)
+
+	log := r.logger.WithField("pod", pod.Name)
 	if err != nil {
-		r.logger.WithField("Restore pod", pod.Name).WithError(err).Error("unable to get DataDownload")
+		log.WithError(err).Error("unable to get DataDownload")
 		return []reconcile.Request{}
 	} else if dd == nil {
-		r.logger.WithField("Restore pod", pod.Name).Error("get empty DataDownload")
+		log.Error("get empty DataDownload")
 		return []reconcile.Request{}
 	}
+	log = log.WithFields(logrus.Fields{
+		"Dataddownload": dd.Name,
+	})
 
 	if dd.Status.Phase != velerov2alpha1api.DataDownloadPhaseAccepted {
 		return []reconcile.Request{}
 	}
 
-	requests := make([]reconcile.Request, 1)
+	if pod.Status.Phase == v1.PodRunning {
+		log.Info("Preparing data download")
+		// we don't expect anyone else update the CR during the Prepare process
+		updated, err := r.exclusiveUpdateDataDownload(context.Background(), dd, r.prepareDataDownload)
+		if err != nil || !updated {
+			log.WithField("updated", updated).WithError(err).Warn("failed to update datadownload, prepare will halt for this datadownload")
+			return []reconcile.Request{}
+		}
+	} else if unrecoverable, reason := kube.IsPodUnrecoverable(pod, log); unrecoverable {
+		err := UpdateDataDownloadWithRetry(context.Background(), r.client, types.NamespacedName{Namespace: dd.Namespace, Name: dd.Name}, r.logger.WithField("datadownlad", dd.Name),
+			func(dataDownload *velerov2alpha1api.DataDownload) {
+				dataDownload.Spec.Cancel = true
+				dataDownload.Status.Message = fmt.Sprintf("datadownload mark as cancel to failed early for exposing pod %s/%s is in abnormal status for %s", pod.Namespace, pod.Name, reason)
+			})
 
-	r.logger.WithField("Restore pod", pod.Name).Infof("Preparing data download %s", dd.Name)
-
-	// we don't expect anyone else update the CR during the Prepare process
-	updated, err := r.exclusiveUpdateDataDownload(context.Background(), dd, r.prepareDataDownload)
-	if err != nil || !updated {
-		r.logger.WithFields(logrus.Fields{
-			"Datadownload": dd.Name,
-			"Restore pod":  pod.Name,
-			"updated":      updated,
-		}).WithError(err).Warn("failed to patch datadownload, prepare will halt for this datadownload")
+		if err != nil {
+			log.WithError(err).Warn("failed to cancel datadownload, and it will wait for prepare timeout")
+			return []reconcile.Request{}
+		}
+		log.Info("Exposed pod is in abnormal status, and datadownload is marked as cancel")
+	} else {
 		return []reconcile.Request{}
 	}
 
-	requests[0] = reconcile.Request{
+	request := reconcile.Request{
 		NamespacedName: types.NamespacedName{
 			Namespace: dd.Namespace,
 			Name:      dd.Name,
 		},
 	}
-
-	return requests
+	return []reconcile.Request{request}
 }
 
 func (r *DataDownloadReconciler) FindDataDownloads(ctx context.Context, cli client.Client, ns string) ([]*velerov2alpha1api.DataDownload, error) {
@@ -574,6 +579,51 @@ func (r *DataDownloadReconciler) FindDataDownloads(ctx context.Context, cli clie
 		}
 	}
 	return dataDownloads, nil
+}
+
+func (r *DataDownloadReconciler) findAcceptDataDownloadsByNodeLabel(ctx context.Context, cli client.Client, ns string) ([]velerov2alpha1api.DataDownload, error) {
+	dataDownloads := &velerov2alpha1api.DataDownloadList{}
+	if err := cli.List(ctx, dataDownloads, &client.ListOptions{Namespace: ns}); err != nil {
+		r.logger.WithError(errors.WithStack(err)).Error("failed to list datauploads")
+		return nil, errors.Wrapf(err, "failed to list datauploads")
+	}
+
+	var result []velerov2alpha1api.DataDownload
+	for _, dd := range dataDownloads.Items {
+		if dd.Status.Phase != velerov2alpha1api.DataDownloadPhaseAccepted {
+			continue
+		}
+		if dd.Labels[acceptNodeLabelKey] == r.nodeName {
+			result = append(result, dd)
+		}
+	}
+	return result, nil
+}
+
+// CancelAcceptedDataDownload will cancel the accepted data download
+func (r *DataDownloadReconciler) CancelAcceptedDataDownload(ctx context.Context, cli client.Client, ns string) {
+	r.logger.Infof("Canceling accepted data for node %s", r.nodeName)
+	dataDownloads, err := r.findAcceptDataDownloadsByNodeLabel(ctx, cli, ns)
+	if err != nil {
+		r.logger.WithError(err).Error("failed to find data downloads")
+		return
+	}
+
+	for _, dd := range dataDownloads {
+		if dd.Spec.Cancel {
+			continue
+		}
+		err = UpdateDataDownloadWithRetry(ctx, cli, types.NamespacedName{Namespace: dd.Namespace, Name: dd.Name},
+			r.logger.WithField("dataupload", dd.Name), func(dataDownload *velerov2alpha1api.DataDownload) {
+				dataDownload.Spec.Cancel = true
+				dataDownload.Status.Message = fmt.Sprintf("found a datadownload with status %q during the node-agent starting, mark it as cancel", dd.Status.Phase)
+			})
+
+		r.logger.Warn(dd.Status.Message)
+		if err != nil {
+			r.logger.WithError(err).Errorf("failed to set cancel flag with error %s", err.Error())
+		}
+	}
 }
 
 func (r *DataDownloadReconciler) prepareDataDownload(ssb *velerov2alpha1api.DataDownload) {
@@ -729,7 +779,7 @@ func isDataDownloadInFinalState(dd *velerov2alpha1api.DataDownload) bool {
 }
 
 func UpdateDataDownloadWithRetry(ctx context.Context, client client.Client, namespacedName types.NamespacedName, log *logrus.Entry, updateFunc func(dataDownload *velerov2alpha1api.DataDownload)) error {
-	return wait.PollUntilWithContext(ctx, time.Second, func(ctx context.Context) (done bool, err error) {
+	return wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (done bool, err error) {
 		dd := &velerov2alpha1api.DataDownload{}
 		if err := client.Get(ctx, namespacedName, dd); err != nil {
 			return false, errors.Wrap(err, "getting DataDownload")
@@ -748,4 +798,36 @@ func UpdateDataDownloadWithRetry(ctx context.Context, client client.Client, name
 
 		return true, nil
 	})
+}
+
+func (r *DataDownloadReconciler) AttemptDataDownloadResume(ctx context.Context, cli client.Client, logger *logrus.Entry, ns string) error {
+	if dataDownloads, err := r.FindDataDownloads(ctx, cli, ns); err != nil {
+		return errors.Wrapf(err, "failed to find data downloads")
+	} else {
+		for i := range dataDownloads {
+			dd := dataDownloads[i]
+			if dd.Status.Phase == velerov2alpha1api.DataDownloadPhasePrepared {
+				// keep doing nothing let controller re-download the data
+				// the Prepared CR could be still handled by datadownload controller after node-agent restart
+				logger.WithField("datadownload", dd.GetName()).Debug("find a datadownload with status prepared")
+			} else if dd.Status.Phase == velerov2alpha1api.DataDownloadPhaseInProgress {
+				err = UpdateDataDownloadWithRetry(ctx, cli, types.NamespacedName{Namespace: dd.Namespace, Name: dd.Name}, logger.WithField("datadownload", dd.Name),
+					func(dataDownload *velerov2alpha1api.DataDownload) {
+						dataDownload.Spec.Cancel = true
+						dataDownload.Status.Message = fmt.Sprintf("found a datadownload with status %q during the node-agent starting, mark it as cancel", dd.Status.Phase)
+					})
+
+				if err != nil {
+					logger.WithError(errors.WithStack(err)).Errorf("failed to mark datadownload %q into canceled", dd.GetName())
+					continue
+				}
+				logger.WithField("datadownload", dd.GetName()).Debug("mark datadownload into canceled")
+			}
+		}
+	}
+
+	//If the data download is in Accepted status, the expoded PVC may be not created
+	// so we need to mark the data download as canceled for it may not be recoverable
+	r.CancelAcceptedDataDownload(ctx, cli, ns)
+	return nil
 }

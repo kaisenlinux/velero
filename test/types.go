@@ -21,12 +21,15 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/vmware-tanzu/velero/pkg/cmd/cli/install"
 	. "github.com/vmware-tanzu/velero/test/util/k8s"
 )
 
 const StorageClassName = "e2e-storage-class"
 const StorageClassName2 = "e2e-storage-class-2"
+const FeatureCSI = "EnableCSI"
 
+var InstallVelero bool
 var UUIDgen uuid.UUID
 
 var VeleroCfg VeleroConfig
@@ -40,6 +43,7 @@ var ReportData *Report
 
 type VeleroConfig struct {
 	VeleroCfgInPerf
+	install.Options
 	VeleroCLI                         string
 	VeleroImage                       string
 	VeleroVersion                     string
@@ -64,9 +68,7 @@ type VeleroConfig struct {
 	MigrateFromVeleroCLI              string
 	Plugins                           string
 	AddBSLPlugins                     string
-	InstallVelero                     bool
 	KibishiiDirectory                 string
-	Features                          string
 	Debug                             bool
 	GCFrequency                       string
 	DefaultCluster                    string
@@ -74,12 +76,7 @@ type VeleroConfig struct {
 	ClientToInstallVelero             *TestClient
 	DefaultClient                     *TestClient
 	StandbyClient                     *TestClient
-	UploaderType                      string
-	UseNodeAgent                      bool
-	UseRestic                         bool
 	ProvideSnapshotsVolumeParam       bool
-	DefaultVolumesToFsBackup          bool
-	UseVolumeSnapshots                bool
 	VeleroServerDebugMode             bool
 	SnapshotMoveData                  bool
 	DataMoverPlugin                   string
@@ -87,12 +84,16 @@ type VeleroConfig struct {
 	StandbyClusterPlugins             string
 	StandbyClusterOjbectStoreProvider string
 	DebugVeleroPodRestart             bool
+	IsUpgradeTest                     bool
+	WithoutDisableInformerCacheParam  bool
+	DisableInformerCache              bool
 }
 
 type VeleroCfgInPerf struct {
-	NFSServerPath    string
-	TestCaseDescribe string
-	BackupForRestore string
+	NFSServerPath         string
+	TestCaseDescribe      string
+	BackupForRestore      string
+	DeleteClusterResource bool
 }
 
 type SnapshotCheckPoint struct {

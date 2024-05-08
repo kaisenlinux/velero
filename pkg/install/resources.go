@@ -246,6 +246,7 @@ type VeleroOptions struct {
 	VSLConfig                       map[string]string
 	DefaultRepoMaintenanceFrequency time.Duration
 	GarbageCollectionFrequency      time.Duration
+	PodVolumeOperationTimeout       time.Duration
 	Plugins                         []string
 	NoDefaultBackupLocation         bool
 	CACertData                      []byte
@@ -254,6 +255,7 @@ type VeleroOptions struct {
 	UploaderType                    string
 	DefaultSnapshotMoveData         bool
 	DisableInformerCache            bool
+	ScheduleSkipImmediately         bool
 }
 
 func AllCRDs() *unstructured.UnstructuredList {
@@ -335,7 +337,9 @@ func AllResources(o *VeleroOptions) *unstructured.UnstructuredList {
 		WithDefaultRepoMaintenanceFrequency(o.DefaultRepoMaintenanceFrequency),
 		WithServiceAccountName(serviceAccountName),
 		WithGarbageCollectionFrequency(o.GarbageCollectionFrequency),
+		WithPodVolumeOperationTimeout(o.PodVolumeOperationTimeout),
 		WithUploaderType(o.UploaderType),
+		WithScheduleSkipImmediately(o.ScheduleSkipImmediately),
 	}
 
 	if len(o.Features) > 0 {

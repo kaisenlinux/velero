@@ -22,7 +22,8 @@ import (
 	"errors"
 	"testing"
 
-	awscredentials "github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/kopia/kopia/repo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -39,16 +40,15 @@ import (
 
 func TestGetStorageCredentials(t *testing.T) {
 	testCases := []struct {
-		name                string
-		backupLocation      velerov1api.BackupStorageLocation
-		credFileStore       *credmock.FileStore
-		credStoreError      error
-		credStorePath       string
-		getAzureCredentials func(map[string]string) (string, string, error)
-		getS3Credentials    func(map[string]string) (*awscredentials.Value, error)
-		getGCPCredentials   func(map[string]string) string
-		expected            map[string]string
-		expectedErr         string
+		name              string
+		backupLocation    velerov1api.BackupStorageLocation
+		credFileStore     *credmock.FileStore
+		credStoreError    error
+		credStorePath     string
+		getS3Credentials  func(map[string]string) (*aws.Credentials, error)
+		getGCPCredentials func(map[string]string) string
+		expected          map[string]string
+		expectedErr       string
 	}{
 		{
 			name:        "invalid credentials file store interface",
@@ -89,8 +89,8 @@ func TestGetStorageCredentials(t *testing.T) {
 					},
 				},
 			},
-			getS3Credentials: func(config map[string]string) (*awscredentials.Value, error) {
-				return &awscredentials.Value{
+			getS3Credentials: func(config map[string]string) (*aws.Credentials, error) {
+				return &aws.Credentials{
 					AccessKeyID: "from: " + config["credentialsFile"],
 				}, nil
 			},
@@ -115,8 +115,8 @@ func TestGetStorageCredentials(t *testing.T) {
 			},
 			credFileStore: new(credmock.FileStore),
 			credStorePath: "credentials-from-credential-key",
-			getS3Credentials: func(config map[string]string) (*awscredentials.Value, error) {
-				return &awscredentials.Value{
+			getS3Credentials: func(config map[string]string) (*aws.Credentials, error) {
+				return &aws.Credentials{
 					AccessKeyID: "from: " + config["credentialsFile"],
 				}, nil
 			},
@@ -138,7 +138,7 @@ func TestGetStorageCredentials(t *testing.T) {
 					},
 				},
 			},
-			getS3Credentials: func(config map[string]string) (*awscredentials.Value, error) {
+			getS3Credentials: func(config map[string]string) (*aws.Credentials, error) {
 				return nil, errors.New("fake error")
 			},
 			credFileStore: new(credmock.FileStore),
@@ -153,50 +153,22 @@ func TestGetStorageCredentials(t *testing.T) {
 					Config:   map[string]string{},
 				},
 			},
-			getS3Credentials: func(config map[string]string) (*awscredentials.Value, error) {
+			getS3Credentials: func(config map[string]string) (*aws.Credentials, error) {
 				return nil, nil
 			},
 			credFileStore: new(credmock.FileStore),
 			expected:      map[string]string{},
 		},
 		{
-			name: "azure, Credential section exists in BSL",
+			name: "azure",
 			backupLocation: velerov1api.BackupStorageLocation{
 				Spec: velerov1api.BackupStorageLocationSpec{
-					Provider: "velero.io/azure",
-					Config: map[string]string{
-						"credentialsFile": "credentials-from-config-map",
-					},
+					Provider:   "velero.io/azure",
 					Credential: &corev1api.SecretKeySelector{},
 				},
 			},
 			credFileStore: new(credmock.FileStore),
-			credStorePath: "credentials-from-credential-key",
-			getAzureCredentials: func(config map[string]string) (string, string, error) {
-				return "storage account from: " + config["credentialsFile"], "", nil
-			},
-
-			expected: map[string]string{
-				"storageAccount": "storage account from: credentials-from-credential-key",
-				"storageKey":     "",
-			},
-		},
-		{
-			name: "azure, get azure credentials fails",
-			backupLocation: velerov1api.BackupStorageLocation{
-				Spec: velerov1api.BackupStorageLocationSpec{
-					Provider: "velero.io/azure",
-					Config: map[string]string{
-						"credentialsFile": "credentials-from-config-map",
-					},
-				},
-			},
-			getAzureCredentials: func(config map[string]string) (string, string, error) {
-				return "", "", errors.New("fake error")
-			},
-			credFileStore: new(credmock.FileStore),
-			expected:      map[string]string{},
-			expectedErr:   "error get azure credentials: fake error",
+			expected:      nil,
 		},
 		{
 			name: "gcp, Credential section not exists in BSL",
@@ -220,7 +192,6 @@ func TestGetStorageCredentials(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			getAzureCredentials = tc.getAzureCredentials
 			getS3Credentials = tc.getS3Credentials
 			getGCPCredentials = tc.getGCPCredentials
 
@@ -245,14 +216,14 @@ func TestGetStorageCredentials(t *testing.T) {
 
 func TestGetStorageVariables(t *testing.T) {
 	testCases := []struct {
-		name                  string
-		backupLocation        velerov1api.BackupStorageLocation
-		repoName              string
-		repoBackend           string
-		getS3BucketRegion     func(string) (string, error)
-		getAzureStorageDomain func(map[string]string) (string, error)
-		expected              map[string]string
-		expectedErr           string
+		name              string
+		backupLocation    velerov1api.BackupStorageLocation
+		credFileStore     *credmock.FileStore
+		repoName          string
+		repoBackend       string
+		getS3BucketRegion func(string) (string, error)
+		expected          map[string]string
+		expectedErr       string
 	}{
 		{
 			name: "invalid provider",
@@ -414,11 +385,11 @@ func TestGetStorageVariables(t *testing.T) {
 				"endpoint":      "fake-url",
 				"doNotUseTLS":   "false",
 				"skipTLSVerify": "false",
-				"customCA":      base64.StdEncoding.EncodeToString([]byte{0x01, 0x02, 0x03, 0x04, 0x05}),
+				"caCert":        base64.StdEncoding.EncodeToString([]byte{0x01, 0x02, 0x03, 0x04, 0x05}),
 			},
 		},
 		{
-			name: "azure, getAzureStorageDomain fail",
+			name: "azure",
 			backupLocation: velerov1api.BackupStorageLocation{
 				Spec: velerov1api.BackupStorageLocationSpec{
 					Provider: "velero.io/azure",
@@ -436,68 +407,13 @@ func TestGetStorageVariables(t *testing.T) {
 					},
 				},
 			},
-			getAzureStorageDomain: func(config map[string]string) (string, error) {
-				return "", errors.New("fake error")
-			},
-			repoBackend: "fake-repo-type",
-			expected:    map[string]string{},
-			expectedErr: "error to get azure storage domain: fake error",
-		},
-		{
-			name: "azure, ObjectStorage section exists in BSL",
-			backupLocation: velerov1api.BackupStorageLocation{
-				Spec: velerov1api.BackupStorageLocationSpec{
-					Provider: "velero.io/azure",
-					Config: map[string]string{
-						"bucket": "fake-bucket-config",
-						"prefix": "fake-prefix-config",
-						"region": "fake-region",
-						"fspath": "",
-					},
-					StorageType: velerov1api.StorageType{
-						ObjectStorage: &velerov1api.ObjectStorageLocation{
-							Bucket: "fake-bucket-object-store",
-							Prefix: "fake-prefix-object-store",
-						},
-					},
-				},
-			},
-			getAzureStorageDomain: func(config map[string]string) (string, error) {
-				return "fake-domain", nil
-			},
-			repoBackend: "fake-repo-type",
+			credFileStore: new(credmock.FileStore),
+			repoBackend:   "fake-repo-type",
 			expected: map[string]string{
-				"bucket":        "fake-bucket-object-store",
-				"prefix":        "fake-prefix-object-store/fake-repo-type/",
-				"region":        "fake-region",
-				"fspath":        "",
-				"storageDomain": "fake-domain",
-			},
-		},
-		{
-			name: "azure, ObjectStorage section not exists in BSL, repo name exists",
-			backupLocation: velerov1api.BackupStorageLocation{
-				Spec: velerov1api.BackupStorageLocationSpec{
-					Provider: "velero.io/azure",
-					Config: map[string]string{
-						"bucket": "fake-bucket",
-						"prefix": "fake-prefix",
-						"region": "fake-region",
-						"fspath": "",
-					},
-				},
-			},
-			repoName:    "//fake-name//",
-			repoBackend: "fake-repo-type",
-			getAzureStorageDomain: func(config map[string]string) (string, error) {
-				return "fake-domain", nil
-			},
-			expected: map[string]string{
-				"bucket":        "fake-bucket",
-				"prefix":        "fake-prefix/fake-repo-type/fake-name/",
-				"region":        "fake-region",
-				"fspath":        "",
-				"storageDomain": "fake-domain",
+				"bucket": "fake-bucket-object-store",
+				"prefix": "fake-prefix-object-store/fake-repo-type/",
+				"region": "fake-region",
+				"fspath": "",
 			},
 		},
 		{
@@ -521,12 +437,12 @@ func TestGetStorageVariables(t *testing.T) {
 		},
 	}
 
+	credFileStore := new(credmock.FileStore)
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			getS3BucketRegion = tc.getS3BucketRegion
-			getAzureStorageDomain = tc.getAzureStorageDomain
 
-			actual, err := getStorageVariables(&tc.backupLocation, tc.repoBackend, tc.repoName)
+			actual, err := getStorageVariables(&tc.backupLocation, tc.repoBackend, tc.repoName, credFileStore)
 
 			require.Equal(t, tc.expected, actual)
 
@@ -615,7 +531,7 @@ func TestGetStoreOptions(t *testing.T) {
 				BackupRepo:     &velerov1api.BackupRepository{},
 			},
 			funcTable: localFuncTable{
-				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string) (map[string]string, error) {
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, velerocredentials.FileStore) (map[string]string, error) {
 					return map[string]string{}, errors.New("fake-error-2")
 				},
 			},
@@ -629,7 +545,7 @@ func TestGetStoreOptions(t *testing.T) {
 				BackupRepo:     &velerov1api.BackupRepository{},
 			},
 			funcTable: localFuncTable{
-				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string) (map[string]string, error) {
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, velerocredentials.FileStore) (map[string]string, error) {
 					return map[string]string{}, nil
 				},
 				getStorageCredentials: func(*velerov1api.BackupStorageLocation, velerocredentials.FileStore) (map[string]string, error) {
@@ -689,7 +605,7 @@ func TestPrepareRepo(t *testing.T) {
 			repoService:     new(reposervicenmocks.BackupRepoService),
 			credStoreReturn: "fake-password",
 			funcTable: localFuncTable{
-				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string) (map[string]string, error) {
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, velerocredentials.FileStore) (map[string]string, error) {
 					return map[string]string{}, errors.New("fake-store-option-error")
 				},
 			},
@@ -700,7 +616,7 @@ func TestPrepareRepo(t *testing.T) {
 			getter:          new(credmock.SecretStore),
 			credStoreReturn: "fake-password",
 			funcTable: localFuncTable{
-				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string) (map[string]string, error) {
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, velerocredentials.FileStore) (map[string]string, error) {
 					return map[string]string{}, nil
 				},
 				getStorageCredentials: func(*velerov1api.BackupStorageLocation, velerocredentials.FileStore) (map[string]string, error) {
@@ -720,7 +636,7 @@ func TestPrepareRepo(t *testing.T) {
 			getter:          new(credmock.SecretStore),
 			credStoreReturn: "fake-password",
 			funcTable: localFuncTable{
-				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string) (map[string]string, error) {
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, velerocredentials.FileStore) (map[string]string, error) {
 					return map[string]string{}, nil
 				},
 				getStorageCredentials: func(*velerov1api.BackupStorageLocation, velerocredentials.FileStore) (map[string]string, error) {
@@ -734,7 +650,28 @@ func TestPrepareRepo(t *testing.T) {
 				}
 				return errors.New("fake-error-2")
 			},
-			expectedErr: "error to init backup repo: fake-error-2",
+			expectedErr: "error to connect to backup repo: fake-error-1",
+		},
+		{
+			name:            "not initialize",
+			getter:          new(credmock.SecretStore),
+			credStoreReturn: "fake-password",
+			funcTable: localFuncTable{
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, velerocredentials.FileStore) (map[string]string, error) {
+					return map[string]string{}, nil
+				},
+				getStorageCredentials: func(*velerov1api.BackupStorageLocation, velerocredentials.FileStore) (map[string]string, error) {
+					return map[string]string{}, nil
+				},
+			},
+			repoService: new(reposervicenmocks.BackupRepoService),
+			retFuncInit: func(ctx context.Context, repoOption udmrepo.RepoOptions, createNew bool) error {
+				if !createNew {
+					return repo.ErrRepositoryNotInitialized
+				}
+				return errors.New("fake-error-2")
+			},
+			expectedErr: "error to create backup repo: fake-error-2",
 		},
 	}
 
@@ -797,7 +734,7 @@ func TestForget(t *testing.T) {
 			getter:          new(credmock.SecretStore),
 			credStoreReturn: "fake-password",
 			funcTable: localFuncTable{
-				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string) (map[string]string, error) {
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, velerocredentials.FileStore) (map[string]string, error) {
 					return map[string]string{}, nil
 				},
 				getStorageCredentials: func(*velerov1api.BackupStorageLocation, velerocredentials.FileStore) (map[string]string, error) {
@@ -821,7 +758,7 @@ func TestForget(t *testing.T) {
 			getter:          new(credmock.SecretStore),
 			credStoreReturn: "fake-password",
 			funcTable: localFuncTable{
-				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string) (map[string]string, error) {
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, velerocredentials.FileStore) (map[string]string, error) {
 					return map[string]string{}, nil
 				},
 				getStorageCredentials: func(*velerov1api.BackupStorageLocation, velerocredentials.FileStore) (map[string]string, error) {
@@ -849,7 +786,7 @@ func TestForget(t *testing.T) {
 			getter:          new(credmock.SecretStore),
 			credStoreReturn: "fake-password",
 			funcTable: localFuncTable{
-				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string) (map[string]string, error) {
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, velerocredentials.FileStore) (map[string]string, error) {
 					return map[string]string{}, nil
 				},
 				getStorageCredentials: func(*velerov1api.BackupStorageLocation, velerocredentials.FileStore) (map[string]string, error) {
@@ -941,7 +878,7 @@ func TestInitRepo(t *testing.T) {
 			getter:          new(credmock.SecretStore),
 			credStoreReturn: "fake-password",
 			funcTable: localFuncTable{
-				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string) (map[string]string, error) {
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, velerocredentials.FileStore) (map[string]string, error) {
 					return map[string]string{}, nil
 				},
 				getStorageCredentials: func(*velerov1api.BackupStorageLocation, velerocredentials.FileStore) (map[string]string, error) {
@@ -959,7 +896,7 @@ func TestInitRepo(t *testing.T) {
 			getter:          new(credmock.SecretStore),
 			credStoreReturn: "fake-password",
 			funcTable: localFuncTable{
-				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string) (map[string]string, error) {
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, velerocredentials.FileStore) (map[string]string, error) {
 					return map[string]string{}, nil
 				},
 				getStorageCredentials: func(*velerov1api.BackupStorageLocation, velerocredentials.FileStore) (map[string]string, error) {
@@ -1029,7 +966,7 @@ func TestConnectToRepo(t *testing.T) {
 			getter:          new(credmock.SecretStore),
 			credStoreReturn: "fake-password",
 			funcTable: localFuncTable{
-				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string) (map[string]string, error) {
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, velerocredentials.FileStore) (map[string]string, error) {
 					return map[string]string{}, nil
 				},
 				getStorageCredentials: func(*velerov1api.BackupStorageLocation, velerocredentials.FileStore) (map[string]string, error) {
@@ -1047,7 +984,7 @@ func TestConnectToRepo(t *testing.T) {
 			getter:          new(credmock.SecretStore),
 			credStoreReturn: "fake-password",
 			funcTable: localFuncTable{
-				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string) (map[string]string, error) {
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, velerocredentials.FileStore) (map[string]string, error) {
 					return map[string]string{}, nil
 				},
 				getStorageCredentials: func(*velerov1api.BackupStorageLocation, velerocredentials.FileStore) (map[string]string, error) {
@@ -1121,7 +1058,7 @@ func TestBoostRepoConnect(t *testing.T) {
 			getter:          new(credmock.SecretStore),
 			credStoreReturn: "fake-password",
 			funcTable: localFuncTable{
-				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string) (map[string]string, error) {
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, velerocredentials.FileStore) (map[string]string, error) {
 					return map[string]string{}, nil
 				},
 				getStorageCredentials: func(*velerov1api.BackupStorageLocation, velerocredentials.FileStore) (map[string]string, error) {
@@ -1148,7 +1085,7 @@ func TestBoostRepoConnect(t *testing.T) {
 			getter:          new(credmock.SecretStore),
 			credStoreReturn: "fake-password",
 			funcTable: localFuncTable{
-				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string) (map[string]string, error) {
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, velerocredentials.FileStore) (map[string]string, error) {
 					return map[string]string{}, nil
 				},
 				getStorageCredentials: func(*velerov1api.BackupStorageLocation, velerocredentials.FileStore) (map[string]string, error) {
@@ -1174,7 +1111,7 @@ func TestBoostRepoConnect(t *testing.T) {
 			getter:          new(credmock.SecretStore),
 			credStoreReturn: "fake-password",
 			funcTable: localFuncTable{
-				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string) (map[string]string, error) {
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, velerocredentials.FileStore) (map[string]string, error) {
 					return map[string]string{}, nil
 				},
 				getStorageCredentials: func(*velerov1api.BackupStorageLocation, velerocredentials.FileStore) (map[string]string, error) {
@@ -1261,7 +1198,7 @@ func TestPruneRepo(t *testing.T) {
 			getter:          new(credmock.SecretStore),
 			credStoreReturn: "fake-password",
 			funcTable: localFuncTable{
-				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string) (map[string]string, error) {
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, velerocredentials.FileStore) (map[string]string, error) {
 					return map[string]string{}, nil
 				},
 				getStorageCredentials: func(*velerov1api.BackupStorageLocation, velerocredentials.FileStore) (map[string]string, error) {
@@ -1279,7 +1216,7 @@ func TestPruneRepo(t *testing.T) {
 			getter:          new(credmock.SecretStore),
 			credStoreReturn: "fake-password",
 			funcTable: localFuncTable{
-				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string) (map[string]string, error) {
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, velerocredentials.FileStore) (map[string]string, error) {
 					return map[string]string{}, nil
 				},
 				getStorageCredentials: func(*velerov1api.BackupStorageLocation, velerocredentials.FileStore) (map[string]string, error) {

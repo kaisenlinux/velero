@@ -60,6 +60,7 @@ func injectSnapshotFuncs() *snapshotMockes {
 		repoWriterMock: &repomocks.RepositoryWriter{},
 	}
 
+	applyRetentionPolicyFunc = s.policyMock.ApplyRetentionPolicy
 	setPolicyFunc = s.policyMock.SetPolicy
 	treeForSourceFunc = s.policyMock.TreeForSource
 	loadSnapshotFunc = s.snapshotMock.LoadSnapshot
@@ -94,9 +95,10 @@ func TestSnapshotSource(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name     string
-		args     []mockArgs
-		notError bool
+		name        string
+		args        []mockArgs
+		uploaderCfg map[string]string
+		notError    bool
 	}{
 		{
 			name: "regular test",
@@ -112,7 +114,7 @@ func TestSnapshotSource(t *testing.T) {
 			notError: true,
 		},
 		{
-			name: "failed to load snapshot",
+			name: "failed to load snapshot, should fallback to full backup and not error",
 			args: []mockArgs{
 				{methodName: "LoadSnapshot", returns: []interface{}{manifest, errors.New("failed to load snapshot")}},
 				{methodName: "SaveSnapshot", returns: []interface{}{manifest.ID, nil}},
@@ -122,7 +124,7 @@ func TestSnapshotSource(t *testing.T) {
 				{methodName: "Upload", returns: []interface{}{manifest, nil}},
 				{methodName: "Flush", returns: []interface{}{nil}},
 			},
-			notError: false,
+			notError: true,
 		},
 		{
 			name: "failed to save snapshot",
@@ -149,6 +151,22 @@ func TestSnapshotSource(t *testing.T) {
 				{methodName: "Flush", returns: []interface{}{nil}},
 			},
 			notError: false,
+		},
+		{
+			name: "set policy with parallel files upload",
+			args: []mockArgs{
+				{methodName: "LoadSnapshot", returns: []interface{}{manifest, nil}},
+				{methodName: "SaveSnapshot", returns: []interface{}{manifest.ID, nil}},
+				{methodName: "TreeForSource", returns: []interface{}{nil, nil}},
+				{methodName: "ApplyRetentionPolicy", returns: []interface{}{nil, nil}},
+				{methodName: "SetPolicy", returns: []interface{}{nil}},
+				{methodName: "Upload", returns: []interface{}{manifest, nil}},
+				{methodName: "Flush", returns: []interface{}{nil}},
+			},
+			uploaderCfg: map[string]string{
+				"ParallelFilesUpload": "10",
+			},
+			notError: true,
 		},
 		{
 			name: "failed to upload snapshot",
@@ -182,7 +200,7 @@ func TestSnapshotSource(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := injectSnapshotFuncs()
 			MockFuncs(s, tc.args)
-			_, _, err = SnapshotSource(ctx, s.repoWriterMock, s.uploderMock, sourceInfo, rootDir, false, "/", nil, log, "TestSnapshotSource")
+			_, _, err = SnapshotSource(ctx, s.repoWriterMock, s.uploderMock, sourceInfo, rootDir, false, "/", nil, tc.uploaderCfg, log, "TestSnapshotSource")
 			if tc.notError {
 				assert.NoError(t, err)
 			} else {
@@ -630,9 +648,9 @@ func TestBackup(t *testing.T) {
 			var snapshotInfo *uploader.SnapshotInfo
 			var err error
 			if tc.isEmptyUploader {
-				snapshotInfo, isSnapshotEmpty, err = Backup(context.Background(), nil, s.repoWriterMock, tc.sourcePath, "", tc.forceFull, tc.parentSnapshot, tc.volMode, tc.tags, &logrus.Logger{})
+				snapshotInfo, isSnapshotEmpty, err = Backup(context.Background(), nil, s.repoWriterMock, tc.sourcePath, "", tc.forceFull, tc.parentSnapshot, tc.volMode, map[string]string{}, tc.tags, &logrus.Logger{})
 			} else {
-				snapshotInfo, isSnapshotEmpty, err = Backup(context.Background(), s.uploderMock, s.repoWriterMock, tc.sourcePath, "", tc.forceFull, tc.parentSnapshot, tc.volMode, tc.tags, &logrus.Logger{})
+				snapshotInfo, isSnapshotEmpty, err = Backup(context.Background(), s.uploderMock, s.repoWriterMock, tc.sourcePath, "", tc.forceFull, tc.parentSnapshot, tc.volMode, map[string]string{}, tc.tags, &logrus.Logger{})
 			}
 			// Check if the returned error matches the expected error
 			if tc.expectedError != nil {
@@ -771,7 +789,7 @@ func TestRestore(t *testing.T) {
 			repoWriterMock.On("OpenObject", mock.Anything, mock.Anything).Return(em, nil)
 
 			progress := new(Progress)
-			bytesRestored, fileCount, err := Restore(context.Background(), repoWriterMock, progress, tc.snapshotID, tc.dest, tc.volMode, logrus.New(), nil)
+			bytesRestored, fileCount, err := Restore(context.Background(), repoWriterMock, progress, tc.snapshotID, tc.dest, tc.volMode, map[string]string{}, logrus.New(), nil)
 
 			// Check if the returned error matches the expected error
 			if tc.expectedError != nil {

@@ -50,13 +50,15 @@ const (
 // we provide more install options other than the standard install.InstallOptions in E2E test
 type installOptions struct {
 	*install.Options
-	RegistryCredentialFile string
-	RestoreHelperImage     string
-	VeleroServerDebugMode  bool
+	RegistryCredentialFile           string
+	RestoreHelperImage               string
+	VeleroServerDebugMode            bool
+	WithoutDisableInformerCacheParam bool
 }
 
 func VeleroInstall(ctx context.Context, veleroCfg *VeleroConfig, isStandbyCluster bool) error {
 	fmt.Printf("Velero install %s\n", time.Now().Format("2006-01-02 15:04:05"))
+
 	// veleroCfg struct including a set of BSL params and a set of additional BSL params,
 	// additional BSL set is for additional BSL test only, so only default BSL set is effective
 	// for VeleroInstall().
@@ -120,12 +122,23 @@ func VeleroInstall(ctx context.Context, veleroCfg *VeleroConfig, isStandbyCluste
 	veleroInstallOptions.UploaderType = veleroCfg.UploaderType
 	GCFrequency, _ := time.ParseDuration(veleroCfg.GCFrequency)
 	veleroInstallOptions.GarbageCollectionFrequency = GCFrequency
+	veleroInstallOptions.PodVolumeOperationTimeout = veleroCfg.PodVolumeOperationTimeout
+	veleroInstallOptions.NodeAgentPodCPULimit = veleroCfg.NodeAgentPodCPULimit
+	veleroInstallOptions.NodeAgentPodCPURequest = veleroCfg.NodeAgentPodCPURequest
+	veleroInstallOptions.NodeAgentPodMemLimit = veleroCfg.NodeAgentPodMemLimit
+	veleroInstallOptions.NodeAgentPodMemRequest = veleroCfg.NodeAgentPodMemRequest
+	veleroInstallOptions.VeleroPodCPULimit = veleroCfg.VeleroPodCPULimit
+	veleroInstallOptions.VeleroPodCPURequest = veleroCfg.VeleroPodCPURequest
+	veleroInstallOptions.VeleroPodMemLimit = veleroCfg.VeleroPodMemLimit
+	veleroInstallOptions.VeleroPodMemRequest = veleroCfg.VeleroPodMemRequest
+	veleroInstallOptions.DisableInformerCache = veleroCfg.DisableInformerCache
 
 	err = installVeleroServer(ctx, veleroCfg.VeleroCLI, veleroCfg.CloudProvider, &installOptions{
-		Options:                veleroInstallOptions,
-		RegistryCredentialFile: veleroCfg.RegistryCredentialFile,
-		RestoreHelperImage:     veleroCfg.RestoreHelperImage,
-		VeleroServerDebugMode:  veleroCfg.VeleroServerDebugMode,
+		Options:                          veleroInstallOptions,
+		RegistryCredentialFile:           veleroCfg.RegistryCredentialFile,
+		RestoreHelperImage:               veleroCfg.RestoreHelperImage,
+		VeleroServerDebugMode:            veleroCfg.VeleroServerDebugMode,
+		WithoutDisableInformerCacheParam: veleroCfg.WithoutDisableInformerCacheParam,
 	})
 
 	if err != nil {
@@ -235,10 +248,19 @@ func installVeleroServer(ctx context.Context, cli, cloudProvider string, options
 	if len(options.Plugins) > 0 {
 		args = append(args, "--plugins", options.Plugins.String())
 	}
+
+	if !options.WithoutDisableInformerCacheParam {
+		if options.DisableInformerCache {
+			args = append(args, "--disable-informer-cache=true")
+		} else {
+			args = append(args, "--disable-informer-cache=false")
+		}
+	}
+
 	fmt.Println("Start to install Azure VolumeSnapshotClass ...")
 	if len(options.Features) > 0 {
 		args = append(args, "--features", options.Features)
-		if strings.EqualFold(options.Features, "EnableCSI") && options.UseVolumeSnapshots {
+		if strings.EqualFold(options.Features, FeatureCSI) && options.UseVolumeSnapshots {
 			if strings.EqualFold(cloudProvider, "azure") {
 				if err := KubectlApplyByFile(ctx, "../util/csi/AzureVolumeSnapshotClass.yaml"); err != nil {
 					return err
@@ -249,6 +271,42 @@ func installVeleroServer(ctx context.Context, cli, cloudProvider string, options
 	}
 	if options.GarbageCollectionFrequency > 0 {
 		args = append(args, fmt.Sprintf("--garbage-collection-frequency=%v", options.GarbageCollectionFrequency))
+	}
+
+	if options.PodVolumeOperationTimeout > 0 {
+		args = append(args, fmt.Sprintf("--pod-volume-operation-timeout=%v", options.PodVolumeOperationTimeout))
+	}
+
+	if options.NodeAgentPodCPULimit != "" {
+		args = append(args, fmt.Sprintf("--node-agent-pod-cpu-limit=%v", options.NodeAgentPodCPULimit))
+	}
+
+	if options.NodeAgentPodCPURequest != "" {
+		args = append(args, fmt.Sprintf("--node-agent-pod-cpu-request=%v", options.NodeAgentPodCPURequest))
+	}
+
+	if options.NodeAgentPodMemLimit != "" {
+		args = append(args, fmt.Sprintf("--node-agent-pod-mem-limit=%v", options.NodeAgentPodMemLimit))
+	}
+
+	if options.NodeAgentPodMemRequest != "" {
+		args = append(args, fmt.Sprintf("--node-agent-pod-mem-request=%v", options.NodeAgentPodMemRequest))
+	}
+
+	if options.VeleroPodCPULimit != "" {
+		args = append(args, fmt.Sprintf("--velero-pod-cpu-limit=%v", options.VeleroPodCPULimit))
+	}
+
+	if options.VeleroPodCPURequest != "" {
+		args = append(args, fmt.Sprintf("--velero-pod-cpu-request=%v", options.VeleroPodCPURequest))
+	}
+
+	if options.VeleroPodMemLimit != "" {
+		args = append(args, fmt.Sprintf("--velero-pod-mem-limit=%v", options.VeleroPodMemLimit))
+	}
+
+	if options.VeleroPodMemRequest != "" {
+		args = append(args, fmt.Sprintf("--velero-pod-mem-request=%v", options.VeleroPodMemRequest))
 	}
 
 	if len(options.UploaderType) > 0 {
@@ -533,13 +591,13 @@ func IsVeleroReady(ctx context.Context, namespace string, useNodeAgent bool) (bo
 	return true, nil
 }
 
-func PrepareVelero(ctx context.Context, caseName string) error {
-	ready, err := IsVeleroReady(context.Background(), VeleroCfg.VeleroNamespace, VeleroCfg.UseNodeAgent)
+func PrepareVelero(ctx context.Context, caseName string, veleroCfg VeleroConfig) error {
+	ready, err := IsVeleroReady(context.Background(), veleroCfg.VeleroNamespace, veleroCfg.UseNodeAgent)
 	if err != nil {
 		fmt.Printf("error in checking velero status with %v", err)
 		ctx, ctxCancel := context.WithTimeout(context.Background(), time.Minute*5)
 		defer ctxCancel()
-		VeleroUninstall(ctx, VeleroCfg.VeleroCLI, VeleroCfg.VeleroNamespace)
+		VeleroUninstall(ctx, veleroCfg.VeleroCLI, veleroCfg.VeleroNamespace)
 		ready = false
 	}
 	if ready {
@@ -547,7 +605,7 @@ func PrepareVelero(ctx context.Context, caseName string) error {
 		return nil
 	}
 	fmt.Printf("need to install velero for case %s \n", caseName)
-	return VeleroInstall(context.Background(), &VeleroCfg, false)
+	return VeleroInstall(context.Background(), &veleroCfg, false)
 }
 
 func VeleroUninstall(ctx context.Context, cli, namespace string) error {

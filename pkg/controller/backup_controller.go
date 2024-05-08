@@ -21,11 +21,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
-	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
-	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned"
-	snapshotv1listers "github.com/kubernetes-csi/external-snapshotter/client/v4/listers/volumesnapshot/v1"
+	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	corev1api "k8s.io/api/core/v1"
@@ -33,7 +32,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -42,6 +40,7 @@ import (
 	"github.com/vmware-tanzu/velero/internal/credentials"
 	"github.com/vmware-tanzu/velero/internal/resourcepolicies"
 	"github.com/vmware-tanzu/velero/internal/storage"
+	internalVolume "github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	pkgbackup "github.com/vmware-tanzu/velero/pkg/backup"
 	"github.com/vmware-tanzu/velero/pkg/discovery"
@@ -84,11 +83,10 @@ type backupReconciler struct {
 	metrics                     *metrics.ServerMetrics
 	backupStoreGetter           persistence.ObjectBackupStoreGetter
 	formatFlag                  logging.Format
-	volumeSnapshotLister        snapshotv1listers.VolumeSnapshotLister
-	volumeSnapshotClient        snapshotterClientSet.Interface
 	credentialFileStore         credentials.FileStore
 	maxConcurrentK8SConnections int
 	defaultSnapshotMoveData     bool
+	globalCRClient              kbclient.Client
 }
 
 func NewBackupReconciler(
@@ -110,11 +108,10 @@ func NewBackupReconciler(
 	metrics *metrics.ServerMetrics,
 	backupStoreGetter persistence.ObjectBackupStoreGetter,
 	formatFlag logging.Format,
-	volumeSnapshotLister snapshotv1listers.VolumeSnapshotLister,
-	volumeSnapshotClient snapshotterClientSet.Interface,
 	credentialStore credentials.FileStore,
 	maxConcurrentK8SConnections int,
 	defaultSnapshotMoveData bool,
+	globalCRClient kbclient.Client,
 ) *backupReconciler {
 	b := &backupReconciler{
 		ctx:                         ctx,
@@ -136,11 +133,10 @@ func NewBackupReconciler(
 		metrics:                     metrics,
 		backupStoreGetter:           backupStoreGetter,
 		formatFlag:                  formatFlag,
-		volumeSnapshotLister:        volumeSnapshotLister,
-		volumeSnapshotClient:        volumeSnapshotClient,
 		credentialFileStore:         credentialStore,
 		maxConcurrentK8SConnections: maxConcurrentK8SConnections,
 		defaultSnapshotMoveData:     defaultSnapshotMoveData,
+		globalCRClient:              globalCRClient,
 	}
 	b.updateTotalBackupMetric()
 	return b
@@ -320,6 +316,7 @@ func (b *backupReconciler) prepareBackupRequest(backup *velerov1api.Backup, logg
 		Backup:           backup.DeepCopy(), // don't modify items in the cache
 		SkippedPVTracker: pkgbackup.NewSkipPVTracker(),
 	}
+	request.VolumesInformation.Init()
 
 	// set backup major version - deprecated, use Status.FormatVersion
 	request.Status.Version = pkgbackup.BackupVersion
@@ -476,7 +473,7 @@ func (b *backupReconciler) prepareBackupRequest(backup *velerov1api.Backup, logg
 		request.Status.ValidationErrors = append(request.Status.ValidationErrors, "encountered labelSelector as well as orLabelSelectors in backup spec, only one can be specified")
 	}
 
-	if request.Spec.ResourcePolicy != nil && request.Spec.ResourcePolicy.Kind == resourcepolicies.ConfigmapRefType {
+	if request.Spec.ResourcePolicy != nil && strings.EqualFold(request.Spec.ResourcePolicy.Kind, resourcepolicies.ConfigmapRefType) {
 		policiesConfigmap := &corev1api.ConfigMap{}
 		err := b.kbClient.Get(context.Background(), kbclient.ObjectKey{Namespace: request.Namespace, Name: request.Spec.ResourcePolicy.Name}, policiesConfigmap)
 		if err != nil {
@@ -540,8 +537,8 @@ func (b *backupReconciler) validateAndGetSnapshotLocations(backup *velerov1api.B
 	if len(errors) > 0 {
 		return nil, errors
 	}
-	vsls := &velerov1api.VolumeSnapshotLocationList{}
-	err := b.kbClient.List(context.Background(), vsls, &kbclient.ListOptions{Namespace: backup.Namespace, LabelSelector: labels.Everything()})
+	volumeSnapshotLocations := &velerov1api.VolumeSnapshotLocationList{}
+	err := b.kbClient.List(context.Background(), volumeSnapshotLocations, &kbclient.ListOptions{Namespace: backup.Namespace, LabelSelector: labels.Everything()})
 	if err != nil {
 		errors = append(errors, fmt.Sprintf("error listing volume snapshot locations: %v", err))
 		return nil, errors
@@ -549,8 +546,8 @@ func (b *backupReconciler) validateAndGetSnapshotLocations(backup *velerov1api.B
 
 	// build a map of provider->list of all locations for the provider
 	allProviderLocations := make(map[string][]*velerov1api.VolumeSnapshotLocation)
-	for i := range vsls.Items {
-		loc := vsls.Items[i]
+	for i := range volumeSnapshotLocations.Items {
+		loc := volumeSnapshotLocations.Items[i]
 		allProviderLocations[loc.Spec.Provider] = append(allProviderLocations[loc.Spec.Provider], &loc)
 	}
 
@@ -590,11 +587,15 @@ func (b *backupReconciler) validateAndGetSnapshotLocations(backup *velerov1api.B
 
 	// add credential to config for each location
 	for _, location := range providerLocations {
-		err = volume.UpdateVolumeSnapshotLocationWithCredentialConfig(location, b.credentialFileStore)
+		err = internalVolume.UpdateVolumeSnapshotLocationWithCredentialConfig(location, b.credentialFileStore)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("error adding credentials to volume snapshot location named %s: %v", location.Name, err))
 			continue
 		}
+	}
+
+	if len(errors) > 0 {
+		return nil, errors
 	}
 
 	return providerLocations, nil
@@ -655,65 +656,17 @@ func (b *backupReconciler) runBackup(backup *pkgbackup.Request) error {
 		fatalErrs = append(fatalErrs, err)
 	}
 
-	// Empty slices here so that they can be passed in to the persistBackup call later, regardless of whether or not CSI's enabled.
-	// This way, we only make the Lister call if the feature flag's on.
-	var volumeSnapshots []snapshotv1api.VolumeSnapshot
-	var volumeSnapshotContents []snapshotv1api.VolumeSnapshotContent
-	var volumeSnapshotClasses []snapshotv1api.VolumeSnapshotClass
-	if boolptr.IsSetToTrue(backup.Spec.SnapshotMoveData) {
-		backupLog.Info("backup SnapshotMoveData is set to true, skip VolumeSnapshot resource persistence.")
-	} else if features.IsEnabled(velerov1api.CSIFeatureFlag) {
-		selector := label.NewSelectorForBackup(backup.Name)
-		vscList := &snapshotv1api.VolumeSnapshotContentList{}
-
-		if b.volumeSnapshotLister != nil {
-			tmpVSs, err := b.volumeSnapshotLister.List(label.NewSelectorForBackup(backup.Name))
-			if err != nil {
-				backupLog.Error(err)
-			}
-			for _, vs := range tmpVSs {
-				volumeSnapshots = append(volumeSnapshots, *vs)
-			}
-		}
-
-		backup.CSISnapshots = volumeSnapshots
-
-		err = b.kbClient.List(context.Background(), vscList, &kbclient.ListOptions{LabelSelector: selector})
-		if err != nil {
-			backupLog.Error(err)
-		}
-		if len(vscList.Items) >= 0 {
-			volumeSnapshotContents = vscList.Items
-		}
-
-		vsClassSet := sets.NewString()
-		for index := range volumeSnapshotContents {
-			// persist the volumesnapshotclasses referenced by vsc
-			if volumeSnapshotContents[index].Spec.VolumeSnapshotClassName != nil && !vsClassSet.Has(*volumeSnapshotContents[index].Spec.VolumeSnapshotClassName) {
-				vsClass := &snapshotv1api.VolumeSnapshotClass{}
-				if err := b.kbClient.Get(context.TODO(), kbclient.ObjectKey{Name: *volumeSnapshotContents[index].Spec.VolumeSnapshotClassName}, vsClass); err != nil {
-					backupLog.Error(err)
-				} else {
-					vsClassSet.Insert(*volumeSnapshotContents[index].Spec.VolumeSnapshotClassName)
-					volumeSnapshotClasses = append(volumeSnapshotClasses, *vsClass)
-				}
-			}
-		}
-	}
-
+	// native snapshots phase will either be failed or completed right away
+	// https://github.com/vmware-tanzu/velero/blob/de3ea52f0cc478e99efa7b9524c7f353514261a4/pkg/backup/item_backupper.go#L632-L639
 	backup.Status.VolumeSnapshotsAttempted = len(backup.VolumeSnapshots)
 	for _, snap := range backup.VolumeSnapshots {
 		if snap.Status.Phase == volume.SnapshotPhaseCompleted {
 			backup.Status.VolumeSnapshotsCompleted++
 		}
 	}
-
-	backup.Status.CSIVolumeSnapshotsAttempted = len(backup.CSISnapshots)
-	for _, vs := range backup.CSISnapshots {
-		if vs.Status != nil && boolptr.IsSetToTrue(vs.Status.ReadyToUse) {
-			backup.Status.CSIVolumeSnapshotsCompleted++
-		}
-	}
+	volumeSnapshots, volumeSnapshotContents, volumeSnapshotClasses := pkgbackup.GetBackupCSIResources(b.kbClient, b.globalCRClient, backup.Backup, backupLog)
+	// Update CSIVolumeSnapshotsAttempted
+	backup.Status.CSIVolumeSnapshotsAttempted = len(volumeSnapshots)
 
 	// Iterate over backup item operations and update progress.
 	// Any errors on operations at this point should be added to backup errors.
@@ -782,12 +735,12 @@ func (b *backupReconciler) runBackup(backup *pkgbackup.Request) error {
 	if logFile, err := backupLog.GetPersistFile(); err != nil {
 		fatalErrs = append(fatalErrs, errors.Wrap(err, "error getting backup log file"))
 	} else {
-		if errs := persistBackup(backup, backupFile, logFile, backupStore, volumeSnapshots, volumeSnapshotContents, volumeSnapshotClasses, results); len(errs) > 0 {
+		if errs := persistBackup(backup, backupFile, logFile, backupStore, volumeSnapshots, volumeSnapshotContents, volumeSnapshotClasses, results, b.globalCRClient, backupLog); len(errs) > 0 {
 			fatalErrs = append(fatalErrs, errs...)
 		}
 	}
 
-	b.logger.WithField(Backup, kubeutil.NamespaceAndName(backup)).Info("Backup completed")
+	b.logger.WithField(Backup, kubeutil.NamespaceAndName(backup)).Infof("Initial backup processing complete, moving to %s", backup.Status.Phase)
 
 	// if we return a non-nil error, the calling function will update
 	// the backup's phase to Failed.
@@ -812,6 +765,7 @@ func recordBackupMetrics(log logrus.FieldLogger, backup *velerov1api.Backup, bac
 		backupDurationSeconds := float64(backupDuration / time.Second)
 		serverMetrics.RegisterBackupDuration(backupScheduleName, backupDurationSeconds)
 	}
+
 	if !finalize {
 		serverMetrics.RegisterVolumeSnapshotAttempts(backupScheduleName, backup.Status.VolumeSnapshotsAttempted)
 		serverMetrics.RegisterVolumeSnapshotSuccesses(backupScheduleName, backup.Status.VolumeSnapshotsCompleted)
@@ -819,8 +773,6 @@ func recordBackupMetrics(log logrus.FieldLogger, backup *velerov1api.Backup, bac
 
 		if features.IsEnabled(velerov1api.CSIFeatureFlag) {
 			serverMetrics.RegisterCSISnapshotAttempts(backupScheduleName, backup.Name, backup.Status.CSIVolumeSnapshotsAttempted)
-			serverMetrics.RegisterCSISnapshotSuccesses(backupScheduleName, backup.Name, backup.Status.CSIVolumeSnapshotsCompleted)
-			serverMetrics.RegisterCSISnapshotFailures(backupScheduleName, backup.Name, backup.Status.CSIVolumeSnapshotsAttempted-backup.Status.CSIVolumeSnapshotsCompleted)
 		}
 
 		if backup.Status.Progress != nil {
@@ -831,6 +783,9 @@ func recordBackupMetrics(log logrus.FieldLogger, backup *velerov1api.Backup, bac
 		if backup.Status.Warnings > 0 {
 			serverMetrics.RegisterBackupWarning(backupScheduleName)
 		}
+	} else if features.IsEnabled(velerov1api.CSIFeatureFlag) {
+		serverMetrics.RegisterCSISnapshotSuccesses(backupScheduleName, backup.Name, backup.Status.CSIVolumeSnapshotsCompleted)
+		serverMetrics.RegisterCSISnapshotFailures(backupScheduleName, backup.Name, backup.Status.CSIVolumeSnapshotsAttempted-backup.Status.CSIVolumeSnapshotsCompleted)
 	}
 }
 
@@ -839,8 +794,10 @@ func persistBackup(backup *pkgbackup.Request,
 	backupStore persistence.BackupStore,
 	csiVolumeSnapshots []snapshotv1api.VolumeSnapshot,
 	csiVolumeSnapshotContents []snapshotv1api.VolumeSnapshotContent,
-	csiVolumesnapshotClasses []snapshotv1api.VolumeSnapshotClass,
+	csiVolumeSnapshotClasses []snapshotv1api.VolumeSnapshotClass,
 	results map[string]results.Result,
+	crClient kbclient.Client,
+	logger logrus.FieldLogger,
 ) []error {
 	persistErrs := []error{}
 	backupJSON := new(bytes.Buffer)
@@ -875,7 +832,7 @@ func persistBackup(backup *pkgbackup.Request,
 	if errs != nil {
 		persistErrs = append(persistErrs, errs...)
 	}
-	csiSnapshotClassesJSON, errs := encode.ToJSONGzip(csiVolumesnapshotClasses, "csi volume snapshot classes list")
+	csiSnapshotClassesJSON, errs := encode.ToJSONGzip(csiVolumeSnapshotClasses, "csi volume snapshot classes list")
 	if errs != nil {
 		persistErrs = append(persistErrs, errs...)
 	}
@@ -886,6 +843,19 @@ func persistBackup(backup *pkgbackup.Request,
 	}
 
 	backupResult, errs := encode.ToJSONGzip(results, "backup results")
+	if errs != nil {
+		persistErrs = append(persistErrs, errs...)
+	}
+
+	backup.FillVolumesInformation()
+
+	volumeInfoJSON, errs := encode.ToJSONGzip(backup.VolumesInformation.Result(
+		csiVolumeSnapshots,
+		csiVolumeSnapshotContents,
+		csiVolumeSnapshotClasses,
+		crClient,
+		logger,
+	), "backup volumes information")
 	if errs != nil {
 		persistErrs = append(persistErrs, errs...)
 	}
@@ -901,6 +871,7 @@ func persistBackup(backup *pkgbackup.Request,
 		csiSnapshotContentsJSON = nil
 		csiSnapshotClassesJSON = nil
 		backupResult = nil
+		volumeInfoJSON = nil
 	}
 
 	backupInfo := persistence.BackupInfo{
@@ -916,6 +887,7 @@ func persistBackup(backup *pkgbackup.Request,
 		CSIVolumeSnapshots:        csiSnapshotJSON,
 		CSIVolumeSnapshotContents: csiSnapshotContentsJSON,
 		CSIVolumeSnapshotClasses:  csiSnapshotClassesJSON,
+		BackupVolumeInfo:          volumeInfoJSON,
 	}
 	if err := backupStore.PutBackup(backupInfo); err != nil {
 		persistErrs = append(persistErrs, err)

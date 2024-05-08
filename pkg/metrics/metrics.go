@@ -69,7 +69,7 @@ const (
 	// data mover metrics
 	DataUploadSuccessTotal   = "data_upload_success_total"
 	DataUploadFailureTotal   = "data_upload_failure_total"
-	DataUploadCancelTotal    = "data_upload_cancel_total"
+	DataUploadCancelTotal    = "data_upload_cancel_total" //nolint:gosec // Not a hard code secret.
 	DataDownloadSuccessTotal = "data_download_success_total"
 	DataDownloadFailureTotal = "data_download_failure_total"
 	DataDownloadCancelTotal  = "data_download_cancel_total"
@@ -468,7 +468,7 @@ func (m *ServerMetrics) InitSchedule(scheduleName string) {
 		c.WithLabelValues(scheduleName).Add(0)
 	}
 	if c, ok := m.metrics[backupLastStatus].(*prometheus.GaugeVec); ok {
-		c.WithLabelValues(scheduleName).Add(0)
+		c.WithLabelValues(scheduleName).Set(float64(1))
 	}
 	if c, ok := m.metrics[restoreAttemptTotal].(*prometheus.CounterVec); ok {
 		c.WithLabelValues(scheduleName).Add(0)
@@ -502,6 +502,88 @@ func (m *ServerMetrics) InitSchedule(scheduleName string) {
 	}
 	if c, ok := m.metrics[csiSnapshotFailureTotal].(*prometheus.CounterVec); ok {
 		c.WithLabelValues(scheduleName, "").Add(0)
+	}
+}
+
+// RemoveSchedule removes metrics associated with a specified schedule.
+func (m *ServerMetrics) RemoveSchedule(scheduleName string) {
+	if g, ok := m.metrics[backupTarballSizeBytesGauge].(*prometheus.GaugeVec); ok {
+		g.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupAttemptTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupSuccessTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupPartialFailureTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupFailureTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupValidationFailureTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if h, ok := m.metrics[backupDurationSeconds].(*prometheus.HistogramVec); ok {
+		h.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupDeletionAttemptTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupDeletionSuccessTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupDeletionFailureTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if g, ok := m.metrics[backupLastSuccessfulTimestamp].(*prometheus.GaugeVec); ok {
+		g.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupItemsTotalGauge].(*prometheus.GaugeVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupItemsErrorsGauge].(*prometheus.GaugeVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupWarningTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[backupLastStatus].(*prometheus.GaugeVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[restoreAttemptTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[restorePartialFailureTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[restoreFailedTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[restoreSuccessTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[restoreValidationFailedTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[volumeSnapshotSuccessTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[volumeSnapshotAttemptTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[volumeSnapshotFailureTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName)
+	}
+	if c, ok := m.metrics[csiSnapshotAttemptTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName, "")
+	}
+	if c, ok := m.metrics[csiSnapshotSuccessTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName, "")
+	}
+	if c, ok := m.metrics[csiSnapshotFailureTotal].(*prometheus.CounterVec); ok {
+		c.DeleteLabelValues(scheduleName, "")
 	}
 }
 

@@ -22,44 +22,38 @@ import (
 	"fmt"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
-
-	velerov2alpha1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
-	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
-
 	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	kubeerrs "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/utils/clock"
-
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/vmware-tanzu/velero/internal/credentials"
 	"github.com/vmware-tanzu/velero/internal/delete"
+	internalVolume "github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	velerov2alpha1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
 	"github.com/vmware-tanzu/velero/pkg/discovery"
 	"github.com/vmware-tanzu/velero/pkg/label"
 	"github.com/vmware-tanzu/velero/pkg/metrics"
 	"github.com/vmware-tanzu/velero/pkg/persistence"
 	"github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt"
 	vsv1 "github.com/vmware-tanzu/velero/pkg/plugin/velero/volumesnapshotter/v1"
+	"github.com/vmware-tanzu/velero/pkg/podvolume"
 	"github.com/vmware-tanzu/velero/pkg/repository"
+	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	"github.com/vmware-tanzu/velero/pkg/util/filesystem"
 	"github.com/vmware-tanzu/velero/pkg/util/kube"
-	"github.com/vmware-tanzu/velero/pkg/volume"
-
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	"github.com/vmware-tanzu/velero/pkg/podvolume"
 )
 
 const (
-	snapshotDeleteTimeout     = time.Minute
 	deleteBackupRequestMaxAge = 24 * time.Hour
 )
 
@@ -107,7 +101,7 @@ func (r *backupDeletionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	s := kube.NewPeriodicalEnqueueSource(r.logger, mgr.GetClient(), &velerov1api.DeleteBackupRequestList{}, time.Hour, kube.PeriodicalEnqueueSourceOption{})
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&velerov1api.DeleteBackupRequest{}).
-		Watches(s, nil).
+		WatchesRawSource(s, nil).
 		Complete(r)
 }
 
@@ -381,7 +375,7 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		// Wait for the deletion of restores within certain amount of time.
 		// Notice that there could be potential errors during the finalization process, which may result in the failure to delete the restore.
 		// Therefore, it is advisable to set a timeout period for waiting.
-		err := wait.PollImmediate(time.Second, time.Minute, func() (bool, error) {
+		err := wait.PollUntilContextTimeout(ctx, time.Second, time.Minute, true, func(ctx context.Context) (bool, error) {
 			restoreList := &velerov1api.RestoreList{}
 			if err := r.List(ctx, restoreList, &client.ListOptions{Namespace: backup.Namespace, LabelSelector: selector}); err != nil {
 				return false, err
@@ -462,7 +456,7 @@ func (r *backupDeletionReconciler) volumeSnapshottersForVSL(
 	}
 
 	// add credential to config
-	err := volume.UpdateVolumeSnapshotLocationWithCredentialConfig(vsl, r.credentialStore)
+	err := internalVolume.UpdateVolumeSnapshotLocationWithCredentialConfig(vsl, r.credentialStore)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -513,12 +507,9 @@ func (r *backupDeletionReconciler) deletePodVolumeSnapshots(ctx context.Context,
 		return []error{err}
 	}
 
-	ctx2, cancelFunc := context.WithTimeout(ctx, snapshotDeleteTimeout)
-	defer cancelFunc()
-
 	var errs []error
 	for _, snapshot := range snapshots {
-		if err := r.repoMgr.Forget(ctx2, snapshot); err != nil {
+		if err := r.repoMgr.Forget(ctx, snapshot); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -544,7 +535,11 @@ func (r *backupDeletionReconciler) deleteMovedSnapshots(ctx context.Context, bac
 	for i := range list.Items {
 		cm := list.Items[i]
 		snapshot := repository.SnapshotIdentifier{}
-		b, _ := json.Marshal(cm.Data)
+		b, err := json.Marshal(cm.Data)
+		if err != nil {
+			errs = append(errs, errors.Wrapf(err, "fail to marshal the snapshot info into JSON"))
+			continue
+		}
 		if err := json.Unmarshal(b, &snapshot); err != nil {
 			errs = append(errs, errors.Wrapf(err, "failed to unmarshal snapshot info"))
 			continue

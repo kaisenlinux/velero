@@ -30,6 +30,7 @@ import (
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/restic"
 	"github.com/vmware-tanzu/velero/pkg/uploader"
+	uploaderutil "github.com/vmware-tanzu/velero/pkg/uploader/util"
 	"github.com/vmware-tanzu/velero/pkg/util/filesystem"
 )
 
@@ -122,6 +123,7 @@ func (rp *resticProvider) RunBackup(
 	forceFull bool,
 	parentSnapshot string,
 	volMode uploader.PersistentVolumeMode,
+	uploaderCfg map[string]string,
 	updater uploader.ProgressUpdater) (string, bool, error) {
 	if updater == nil {
 		return "", false, errors.New("Need to initial backup progress updater first")
@@ -143,6 +145,16 @@ func (rp *resticProvider) RunBackup(
 		"path":           path,
 		"parentSnapshot": parentSnapshot,
 	})
+
+	if len(uploaderCfg) > 0 {
+		parallelFilesUpload, err := uploaderutil.GetParallelFilesUpload(uploaderCfg)
+		if err != nil {
+			return "", false, errors.Wrap(err, "failed to get uploader config")
+		}
+		if parallelFilesUpload > 0 {
+			log.Warnf("ParallelFilesUpload is set to %d, but restic does not support parallel file uploads. Ignoring.", parallelFilesUpload)
+		}
+	}
 
 	backupCmd := resticBackupCMDFunc(rp.repoIdentifier, rp.credentialsFile, path, tags)
 	backupCmd.Env = rp.cmdEnv
@@ -185,6 +197,7 @@ func (rp *resticProvider) RunRestore(
 	snapshotID string,
 	volumePath string,
 	volMode uploader.PersistentVolumeMode,
+	uploaderCfg map[string]string,
 	updater uploader.ProgressUpdater) error {
 	if updater == nil {
 		return errors.New("Need to initial backup progress updater first")
@@ -204,8 +217,34 @@ func (rp *resticProvider) RunRestore(
 	if len(rp.extraFlags) != 0 {
 		restoreCmd.ExtraFlags = append(restoreCmd.ExtraFlags, rp.extraFlags...)
 	}
+
+	extraFlags, err := rp.parseRestoreExtraFlags(uploaderCfg)
+	if err != nil {
+		return errors.Wrap(err, "failed to parse uploader config")
+	} else if len(extraFlags) != 0 {
+		restoreCmd.ExtraFlags = append(restoreCmd.ExtraFlags, extraFlags...)
+	}
+
 	stdout, stderr, err := restic.RunRestore(restoreCmd, log, updater)
 
-	log.Infof("Run command=%s, stdout=%s, stderr=%s", restoreCmd.Command, stdout, stderr)
+	log.Infof("Run command=%v, stdout=%s, stderr=%s", restoreCmd, stdout, stderr)
 	return err
+}
+
+func (rp *resticProvider) parseRestoreExtraFlags(uploaderCfg map[string]string) ([]string, error) {
+	extraFlags := []string{}
+	if len(uploaderCfg) == 0 {
+		return extraFlags, nil
+	}
+
+	writeSparseFiles, err := uploaderutil.GetWriteSparseFiles(uploaderCfg)
+	if err != nil {
+		return extraFlags, errors.Wrap(err, "failed to get uploader config")
+	}
+
+	if writeSparseFiles {
+		extraFlags = append(extraFlags, "--sparse")
+	}
+
+	return extraFlags, nil
 }

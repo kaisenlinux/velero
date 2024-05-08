@@ -21,13 +21,11 @@ import (
 	"fmt"
 	"strings"
 
+	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v7/clientset/versioned"
 	"github.com/pkg/errors"
-
-	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	. "github.com/vmware-tanzu/velero/test/util/k8s"
 )
@@ -59,7 +57,7 @@ func GetCsiSnapshotHandle(client TestClient, backupName string) ([]string, error
 	if err != nil {
 		return nil, err
 	}
-	vscList, err1 := snapshotClient.SnapshotV1beta1().VolumeSnapshotContents().List(context.TODO(), metav1.ListOptions{})
+	vscList, err1 := snapshotClient.SnapshotV1().VolumeSnapshotContents().List(context.TODO(), metav1.ListOptions{})
 	if err1 != nil {
 		return nil, err
 	}
@@ -87,7 +85,7 @@ func GetCsiSnapshotHandle(client TestClient, backupName string) ([]string, error
 	}
 
 	if len(snapshotHandleList) == 0 {
-		fmt.Printf("No VolumeSnapshotContent from backup %s", backupName)
+		fmt.Printf("No VolumeSnapshotContent from backup %s\n", backupName)
 	}
 	return snapshotHandleList, nil
 }
@@ -124,10 +122,11 @@ func GetCsiSnapshotHandleV1(client TestClient, backupName string) ([]string, err
 	}
 
 	if len(snapshotHandleList) == 0 {
-		fmt.Printf("No VolumeSnapshotContent from backup %s", backupName)
+		fmt.Printf("No VolumeSnapshotContent from backup %s\n", backupName)
 	}
 	return snapshotHandleList, nil
 }
+
 func GetVolumeSnapshotContentNameByPod(client TestClient, podName, namespace, backupName string) (string, error) {
 	pvcList, err := GetPvcByPVCName(context.Background(), namespace, podName)
 	if err != nil {
@@ -152,7 +151,7 @@ func GetVolumeSnapshotContentNameByPod(client TestClient, podName, namespace, ba
 	if err != nil {
 		return "", err
 	}
-	vsList, err := snapshotClient.SnapshotV1beta1().VolumeSnapshots(namespace).List(context.TODO(), metav1.ListOptions{})
+	vsList, err := snapshotClient.SnapshotV1().VolumeSnapshots(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -180,8 +179,8 @@ func CheckVolumeSnapshotCR(client TestClient, backupName string, expectedCount i
 		return nil, errors.New("API version is invalid")
 	}
 	if len(snapshotContentNameList) != expectedCount {
-		return nil, errors.New(fmt.Sprintf("Snapshot count %d is not as expect %d", len(snapshotContentNameList), expectedCount))
+		return nil, errors.New(fmt.Sprintf("Snapshot content count %d is not as expect %d", len(snapshotContentNameList), expectedCount))
 	}
-	fmt.Println(snapshotContentNameList)
+	fmt.Printf("snapshotContentNameList: %v \n", snapshotContentNameList)
 	return snapshotContentNameList, nil
 }

@@ -17,7 +17,7 @@ limitations under the License.
 package builder
 
 import (
-	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
+	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -59,6 +59,7 @@ func (v *VolumeSnapshotContentBuilder) DeletionPolicy(policy snapshotv1api.Delet
 	return v
 }
 
+// VolumeSnapshotRef sets the built VolumeSnapshotContent's spec.VolumeSnapshotRef value.
 func (v *VolumeSnapshotContentBuilder) VolumeSnapshotRef(namespace, name string) *VolumeSnapshotContentBuilder {
 	v.object.Spec.VolumeSnapshotRef = v1.ObjectReference{
 		APIVersion: "snapshot.storage.k8s.io/v1",
@@ -66,5 +67,20 @@ func (v *VolumeSnapshotContentBuilder) VolumeSnapshotRef(namespace, name string)
 		Namespace:  namespace,
 		Name:       name,
 	}
+	return v
+}
+
+// VolumeSnapshotClassName sets the built VolumeSnapshotContent's spec.VolumeSnapshotClassName value.
+func (v *VolumeSnapshotContentBuilder) VolumeSnapshotClassName(name string) *VolumeSnapshotContentBuilder {
+	v.object.Spec.VolumeSnapshotClassName = &name
+	return v
+}
+
+// ObjectMeta applies functional options to the VolumeSnapshotContent's ObjectMeta.
+func (v *VolumeSnapshotContentBuilder) ObjectMeta(opts ...ObjectMetaOpt) *VolumeSnapshotContentBuilder {
+	for _, opt := range opts {
+		opt(v.object)
+	}
+
 	return v
 }

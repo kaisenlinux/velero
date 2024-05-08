@@ -52,6 +52,7 @@ import (
 	vsv1 "github.com/vmware-tanzu/velero/pkg/plugin/velero/volumesnapshotter/v1"
 	"github.com/vmware-tanzu/velero/pkg/podvolume"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
+	csiutil "github.com/vmware-tanzu/velero/pkg/util/csi"
 	pdvolumeutil "github.com/vmware-tanzu/velero/pkg/util/podvolume"
 	"github.com/vmware-tanzu/velero/pkg/volume"
 )
@@ -77,6 +78,7 @@ type itemBackupper struct {
 
 	itemHookHandler                    hook.ItemHookHandler
 	snapshotLocationVolumeSnapshotters map[string]vsv1.VolumeSnapshotter
+	hookTracker                        *hook.HookTracker
 }
 
 type FileForArchive struct {
@@ -183,7 +185,7 @@ func (ib *itemBackupper) backupItemInternal(logger logrus.FieldLogger, obj runti
 	)
 
 	log.Debug("Executing pre hooks")
-	if err := ib.itemHookHandler.HandleHooks(log, groupResource, obj, ib.backupRequest.ResourceHooks, hook.PhasePre); err != nil {
+	if err := ib.itemHookHandler.HandleHooks(log, groupResource, obj, ib.backupRequest.ResourceHooks, hook.PhasePre, ib.hookTracker); err != nil {
 		return false, itemFiles, err
 	}
 	if optedOut, podName := ib.podVolumeSnapshotTracker.OptedoutByPod(namespace, name); optedOut {
@@ -233,7 +235,7 @@ func (ib *itemBackupper) backupItemInternal(logger logrus.FieldLogger, obj runti
 
 		// if there was an error running actions, execute post hooks and return
 		log.Debug("Executing post hooks")
-		if err := ib.itemHookHandler.HandleHooks(log, groupResource, obj, ib.backupRequest.ResourceHooks, hook.PhasePost); err != nil {
+		if err := ib.itemHookHandler.HandleHooks(log, groupResource, obj, ib.backupRequest.ResourceHooks, hook.PhasePost, ib.hookTracker); err != nil {
 			backupErrs = append(backupErrs, err)
 		}
 		return false, itemFiles, kubeerrs.NewAggregate(backupErrs)
@@ -249,6 +251,10 @@ func (ib *itemBackupper) backupItemInternal(logger logrus.FieldLogger, obj runti
 	namespace = metadata.GetNamespace()
 
 	if groupResource == kuberesource.PersistentVolumes {
+		if err := ib.addVolumeInfo(obj, log); err != nil {
+			backupErrs = append(backupErrs, err)
+		}
+
 		if err := ib.takePVSnapshot(obj, log); err != nil {
 			backupErrs = append(backupErrs, err)
 		}
@@ -288,7 +294,7 @@ func (ib *itemBackupper) backupItemInternal(logger logrus.FieldLogger, obj runti
 	}
 
 	log.Debug("Executing post hooks")
-	if err := ib.itemHookHandler.HandleHooks(log, groupResource, obj, ib.backupRequest.ResourceHooks, hook.PhasePost); err != nil {
+	if err := ib.itemHookHandler.HandleHooks(log, groupResource, obj, ib.backupRequest.ResourceHooks, hook.PhasePost, ib.hookTracker); err != nil {
 		backupErrs = append(backupErrs, err)
 	}
 
@@ -361,6 +367,14 @@ func (ib *itemBackupper) executeActions(
 			ib.trackSkippedPV(obj, groupResource, "", "skipped due to resource policy ", log)
 			continue
 		}
+
+		// If the EnableCSI feature is not enabled, but the executing action is from CSI plugin, skip the action.
+		if csiutil.ShouldSkipAction(actionName) {
+			log.Infof("Skip action %s for resource %s:%s/%s, because the CSI feature is not enabled. Feature setting is %s.",
+				actionName, groupResource.String(), metadata.GetNamespace(), metadata.GetName(), features.Serialize())
+			continue
+		}
+
 		updatedItem, additionalItemIdentifiers, operationID, postOperationItems, err := action.Execute(obj, ib.backupRequest.Backup)
 		if err != nil {
 			return nil, itemFiles, errors.Wrapf(err, "error executing custom action (groupResource=%s, namespace=%s, name=%s)", groupResource.String(), namespace, name)
@@ -370,8 +384,8 @@ func (ib *itemBackupper) executeActions(
 			// snapshot was skipped by CSI plugin
 			ib.trackSkippedPV(obj, groupResource, csiSnapshotApproach, "skipped b/c it's not a CSI volume", log)
 			delete(u.GetAnnotations(), skippedNoCSIPVAnnotation)
-		} else if actionName == csiBIAPluginName || actionName == vsphereBIAPluginName {
-			// the snapshot has been taken
+		} else if (actionName == csiBIAPluginName || actionName == vsphereBIAPluginName) && !boolptr.IsSetToFalse(ib.backupRequest.Backup.Spec.SnapshotVolumes) {
+			// the snapshot has been taken by the BIA plugin
 			ib.unTrackSkippedPV(obj, groupResource, log)
 		}
 		mustInclude := u.GetAnnotations()[mustIncludeAdditionalItemAnnotation] == "true" || finalize
@@ -496,6 +510,7 @@ func (ib *itemBackupper) takePVSnapshot(obj runtime.Unstructured, log logrus.Fie
 
 	if boolptr.IsSetToFalse(ib.backupRequest.Spec.SnapshotVolumes) {
 		log.Info("Backup has volume snapshots disabled; skipping volume snapshot action.")
+		ib.trackSkippedPV(obj, kuberesource.PersistentVolumes, volumeSnapshotApproach, "backup has volume snapshots disabled", log)
 		return nil
 	}
 
@@ -652,6 +667,7 @@ func (ib *itemBackupper) getMatchAction(obj runtime.Unstructured, groupResource 
 		}
 		return ib.backupRequest.ResPolicies.GetMatchAction(pv)
 	}
+
 	return nil, nil
 }
 
@@ -673,6 +689,26 @@ func (ib *itemBackupper) unTrackSkippedPV(obj runtime.Unstructured, groupResourc
 	} else if err != nil {
 		log.WithError(err).Warnf("unable to get PV name, skip untracking.")
 	}
+}
+
+func (ib *itemBackupper) addVolumeInfo(obj runtime.Unstructured, log logrus.FieldLogger) error {
+	pv := new(corev1api.PersistentVolume)
+	err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), pv)
+	if err != nil {
+		log.WithError(err).Warnf("Fail to convert PV")
+		return err
+	}
+
+	pvcName := ""
+	pvcNamespace := ""
+	if pv.Spec.ClaimRef != nil {
+		pvcName = pv.Spec.ClaimRef.Name
+		pvcNamespace = pv.Spec.ClaimRef.Namespace
+	}
+
+	ib.backupRequest.VolumesInformation.InsertPVMap(*pv, pvcName, pvcNamespace)
+
+	return nil
 }
 
 // convert the input object to PV/PVC and get the PV name

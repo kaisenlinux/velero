@@ -25,9 +25,11 @@ import (
 	"testing"
 	"time"
 
+	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	corev1api "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -40,11 +42,14 @@ import (
 	"k8s.io/client-go/dynamic"
 	kubetesting "k8s.io/client-go/testing"
 
+	internalVolume "github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/archive"
 	"github.com/vmware-tanzu/velero/pkg/builder"
 	"github.com/vmware-tanzu/velero/pkg/client"
 	"github.com/vmware-tanzu/velero/pkg/discovery"
+	"github.com/vmware-tanzu/velero/pkg/features"
+	verifiermocks "github.com/vmware-tanzu/velero/pkg/features/mocks"
 	"github.com/vmware-tanzu/velero/pkg/itemoperation"
 	"github.com/vmware-tanzu/velero/pkg/kuberesource"
 	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
@@ -57,6 +62,199 @@ import (
 	. "github.com/vmware-tanzu/velero/pkg/util/results"
 	"github.com/vmware-tanzu/velero/pkg/volume"
 )
+
+func TestRestorePVWithVolumeInfo(t *testing.T) {
+	tests := []struct {
+		name          string
+		restore       *velerov1api.Restore
+		backup        *velerov1api.Backup
+		apiResources  []*test.APIResource
+		tarball       io.Reader
+		want          map[*test.APIResource][]string
+		volumeInfoMap map[string]internalVolume.VolumeInfo
+	}{
+		{
+			name:    "Restore PV with native snapshot",
+			restore: defaultRestore().Result(),
+			backup:  defaultBackup().Result(),
+			tarball: test.NewTarWriter(t).
+				AddItems("persistentvolumes",
+					builder.ForPersistentVolume("pv-1").ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).Result(),
+				).Done(),
+			apiResources: []*test.APIResource{
+				test.PVs(),
+			},
+			volumeInfoMap: map[string]internalVolume.VolumeInfo{
+				"pv-1": {
+					BackupMethod: internalVolume.NativeSnapshot,
+					PVName:       "pv-1",
+					NativeSnapshotInfo: &internalVolume.NativeSnapshotInfo{
+						SnapshotHandle: "testSnapshotHandle",
+					},
+				},
+			},
+			want: map[*test.APIResource][]string{
+				test.PVs(): {"/pv-1"},
+			},
+		},
+		{
+			name:    "Restore PV with PVB",
+			restore: defaultRestore().Result(),
+			backup:  defaultBackup().Result(),
+			tarball: test.NewTarWriter(t).
+				AddItems("persistentvolumes",
+					builder.ForPersistentVolume("pv-1").ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).Result(),
+				).Done(),
+			apiResources: []*test.APIResource{
+				test.PVs(),
+			},
+			volumeInfoMap: map[string]internalVolume.VolumeInfo{
+				"pv-1": {
+					BackupMethod: internalVolume.PodVolumeBackup,
+					PVName:       "pv-1",
+					PVBInfo: &internalVolume.PodVolumeBackupInfo{
+						SnapshotHandle: "testSnapshotHandle",
+						Size:           100,
+						NodeName:       "testNode",
+					},
+				},
+			},
+			want: map[*test.APIResource][]string{
+				test.PVs(): {},
+			},
+		},
+		{
+			name:    "Restore PV with CSI VolumeSnapshot",
+			restore: defaultRestore().Result(),
+			backup:  defaultBackup().Result(),
+			tarball: test.NewTarWriter(t).
+				AddItems("persistentvolumes",
+					builder.ForPersistentVolume("pv-1").ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).Result(),
+				).Done(),
+			apiResources: []*test.APIResource{
+				test.PVs(),
+			},
+			volumeInfoMap: map[string]internalVolume.VolumeInfo{
+				"pv-1": {
+					BackupMethod:      internalVolume.CSISnapshot,
+					SnapshotDataMoved: false,
+					PVName:            "pv-1",
+					CSISnapshotInfo: &internalVolume.CSISnapshotInfo{
+						Driver: "pd.csi.storage.gke.io",
+					},
+				},
+			},
+			want: map[*test.APIResource][]string{
+				test.PVs(): {},
+			},
+		},
+		{
+			name:    "Restore PV with DataUpload",
+			restore: defaultRestore().Result(),
+			backup:  defaultBackup().Result(),
+			tarball: test.NewTarWriter(t).
+				AddItems("persistentvolumes",
+					builder.ForPersistentVolume("pv-1").ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).Result(),
+				).Done(),
+			apiResources: []*test.APIResource{
+				test.PVs(),
+			},
+			volumeInfoMap: map[string]internalVolume.VolumeInfo{
+				"pv-1": {
+					BackupMethod:      internalVolume.CSISnapshot,
+					SnapshotDataMoved: true,
+					PVName:            "pv-1",
+					CSISnapshotInfo: &internalVolume.CSISnapshotInfo{
+						Driver: "pd.csi.storage.gke.io",
+					},
+					SnapshotDataMovementInfo: &internalVolume.SnapshotDataMovementInfo{
+						DataMover: "velero",
+					},
+				},
+			},
+			want: map[*test.APIResource][]string{
+				test.PVs(): {},
+			},
+		},
+		{
+			name:    "Restore PV with ClaimPolicy as Delete",
+			restore: defaultRestore().Result(),
+			backup:  defaultBackup().Result(),
+			tarball: test.NewTarWriter(t).
+				AddItems("persistentvolumes",
+					builder.ForPersistentVolume("pv-1").ReclaimPolicy(corev1api.PersistentVolumeReclaimDelete).Result(),
+				).Done(),
+			apiResources: []*test.APIResource{
+				test.PVs(),
+			},
+			volumeInfoMap: map[string]internalVolume.VolumeInfo{
+				"pv-1": {
+					PVName:  "pv-1",
+					Skipped: true,
+				},
+			},
+			want: map[*test.APIResource][]string{
+				test.PVs(): {},
+			},
+		},
+		{
+			name:    "Restore PV with ClaimPolicy as Retain",
+			restore: defaultRestore().Result(),
+			backup:  defaultBackup().Result(),
+			tarball: test.NewTarWriter(t).
+				AddItems("persistentvolumes",
+					builder.ForPersistentVolume("pv-1").ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).Result(),
+				).Done(),
+			apiResources: []*test.APIResource{
+				test.PVs(),
+			},
+			volumeInfoMap: map[string]internalVolume.VolumeInfo{
+				"pv-1": {
+					PVName:  "pv-1",
+					Skipped: true,
+				},
+			},
+			want: map[*test.APIResource][]string{
+				test.PVs(): {"/pv-1"},
+			},
+		},
+	}
+
+	features.Enable("EnableCSI")
+	finder := new(verifiermocks.PluginFinder)
+	finder.On("Find", mock.Anything, mock.Anything).Return(true)
+	verifier := features.NewVerifier(finder)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+
+			for _, r := range tc.apiResources {
+				h.DiscoveryClient.WithAPIResource(r)
+			}
+			require.NoError(t, h.restorer.discoveryHelper.Refresh())
+			h.restorer.featureVerifier = verifier
+
+			data := &Request{
+				Log:              h.log,
+				Restore:          tc.restore,
+				Backup:           tc.backup,
+				PodVolumeBackups: nil,
+				VolumeSnapshots:  nil,
+				BackupReader:     tc.tarball,
+				VolumeInfoMap:    tc.volumeInfoMap,
+			}
+			warnings, errs := h.restorer.Restore(
+				data,
+				nil, // restoreItemActions
+				nil, // volume snapshotter getter
+			)
+
+			assertEmptyResults(t, warnings, errs)
+			assertAPIContents(t, h, tc.want)
+		})
+	}
+}
 
 // TestRestoreResourceFiltering runs restores with different combinations
 // of resource filters (included/excluded resources, included/excluded
@@ -2040,7 +2238,7 @@ func TestShouldRestore(t *testing.T) {
 				),
 			},
 			want:    false,
-			wantErr: errors.New("timed out waiting for the condition"),
+			wantErr: errors.New("context deadline exceeded"),
 		},
 		{
 			name:   "when PV is found, has associated PVC that's not deleting, has associated NS that is terminating, result is false + timeout error",
@@ -2055,7 +2253,7 @@ func TestShouldRestore(t *testing.T) {
 				builder.ForNamespace("ns-1").Phase(corev1api.NamespaceTerminating).Result(),
 			},
 			want:    false,
-			wantErr: errors.New("timed out waiting for the condition"),
+			wantErr: errors.New("context deadline exceeded"),
 		},
 		{
 			name:   "when PV is found, has associated PVC that's not deleting, has associated NS that has deletion timestamp, result is false + timeout error",
@@ -2070,7 +2268,7 @@ func TestShouldRestore(t *testing.T) {
 				builder.ForNamespace("ns-1").ObjectMeta(builder.WithDeletionTimestamp(time.Now())).Result(),
 			},
 			want:    false,
-			wantErr: errors.New("timed out waiting for the condition"),
+			wantErr: errors.New("context deadline exceeded"),
 		},
 		{
 			name:   "when PV is found, associated PVC is not found, result is false + timeout error",
@@ -2081,7 +2279,7 @@ func TestShouldRestore(t *testing.T) {
 				),
 			},
 			want:    false,
-			wantErr: errors.New("timed out waiting for the condition"),
+			wantErr: errors.New("context deadline exceeded"),
 		},
 		{
 			name:   "when PV is found, has associated PVC, associated namespace not found, result is false + timeout error",
@@ -2093,7 +2291,7 @@ func TestShouldRestore(t *testing.T) {
 				test.PVCs(builder.ForPersistentVolumeClaim("ns-1", "pvc-1").Result()),
 			},
 			want:    false,
-			wantErr: errors.New("timed out waiting for the condition"),
+			wantErr: errors.New("context deadline exceeded"),
 		},
 	}
 
@@ -2256,6 +2454,7 @@ func (*volumeSnapshotter) DeleteSnapshot(snapshotID string) error {
 // Verification is done by looking at the contents of the API and the metadata/spec/status of
 // the items in the API.
 func TestRestorePersistentVolumes(t *testing.T) {
+	testPVCName := "testPVC"
 	tests := []struct {
 		name                    string
 		restore                 *velerov1api.Restore
@@ -2265,9 +2464,12 @@ func TestRestorePersistentVolumes(t *testing.T) {
 		volumeSnapshots         []*volume.Snapshot
 		volumeSnapshotLocations []*velerov1api.VolumeSnapshotLocation
 		volumeSnapshotterGetter volumeSnapshotterGetter
+		csiVolumeSnapshots      []*snapshotv1api.VolumeSnapshot
+		dataUploadResult        *corev1api.ConfigMap
 		want                    []*test.APIResource
 		wantError               bool
 		wantWarning             bool
+		csiFeatureVerifierErr   string
 	}{
 		{
 			name:    "when a PV with a reclaim policy of delete has no snapshot and does not exist in-cluster, it does not get restored, and its PVC gets reset for dynamic provisioning",
@@ -2923,6 +3125,152 @@ func TestRestorePersistentVolumes(t *testing.T) {
 				),
 			},
 		},
+		{
+			name:    "when a PV with a reclaim policy of retain has a CSI VolumeSnapshot and does not exist in-cluster, the PV is not restored",
+			restore: defaultRestore().Result(),
+			backup:  defaultBackup().Result(),
+			tarball: test.NewTarWriter(t).
+				AddItems("persistentvolumes",
+					builder.ForPersistentVolume("pv-1").
+						ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).
+						ClaimRef("velero", testPVCName).
+						Result(),
+				).
+				Done(),
+			apiResources: []*test.APIResource{
+				test.PVs(),
+				test.PVCs(),
+			},
+			csiVolumeSnapshots: []*snapshotv1api.VolumeSnapshot{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "velero",
+						Name:      "test",
+					},
+					Spec: snapshotv1api.VolumeSnapshotSpec{
+						Source: snapshotv1api.VolumeSnapshotSource{
+							PersistentVolumeClaimName: &testPVCName,
+						},
+					},
+				},
+			},
+			volumeSnapshotLocations: []*velerov1api.VolumeSnapshotLocation{
+				builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "default").Provider("provider-1").Result(),
+			},
+			volumeSnapshotterGetter: map[string]vsv1.VolumeSnapshotter{
+				"provider-1": &volumeSnapshotter{
+					snapshotVolumes: map[string]string{"snapshot-1": "new-volume"},
+				},
+			},
+			want: []*test.APIResource{},
+		},
+		{
+			name:    "when a PV has a CSI VolumeSnapshot, but CSI modules are not ready, the PV is not restored",
+			restore: defaultRestore().Result(),
+			backup:  defaultBackup().Result(),
+			tarball: test.NewTarWriter(t).
+				AddItems("persistentvolumes",
+					builder.ForPersistentVolume("pv-1").
+						ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).
+						ClaimRef("velero", testPVCName).
+						Result(),
+				).
+				Done(),
+			apiResources: []*test.APIResource{
+				test.PVs(),
+				test.PVCs(),
+			},
+			csiVolumeSnapshots: []*snapshotv1api.VolumeSnapshot{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "velero",
+						Name:      "test",
+					},
+					Spec: snapshotv1api.VolumeSnapshotSpec{
+						Source: snapshotv1api.VolumeSnapshotSource{
+							PersistentVolumeClaimName: &testPVCName,
+						},
+					},
+				},
+			},
+			volumeSnapshotLocations: []*velerov1api.VolumeSnapshotLocation{
+				builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "default").Provider("provider-1").Result(),
+			},
+			volumeSnapshotterGetter: map[string]vsv1.VolumeSnapshotter{
+				"provider-1": &volumeSnapshotter{
+					snapshotVolumes: map[string]string{"snapshot-1": "new-volume"},
+				},
+			},
+			want:                  []*test.APIResource{},
+			csiFeatureVerifierErr: "fake-feature-check-error",
+			wantError:             true,
+		},
+		{
+			name:    "when a PV with a reclaim policy of retain has a DataUpload result CM and does not exist in-cluster, the PV is not restored",
+			restore: defaultRestore().ObjectMeta(builder.WithUID("fakeUID")).Result(),
+			backup:  defaultBackup().Result(),
+			tarball: test.NewTarWriter(t).
+				AddItems("persistentvolumes",
+					builder.ForPersistentVolume("pv-1").
+						ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).
+						ClaimRef("velero", testPVCName).
+						Result(),
+				).
+				Done(),
+			apiResources: []*test.APIResource{
+				test.PVs(),
+				test.PVCs(),
+				test.ConfigMaps(),
+			},
+			volumeSnapshotLocations: []*velerov1api.VolumeSnapshotLocation{
+				builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "default").Provider("provider-1").Result(),
+			},
+			volumeSnapshotterGetter: map[string]vsv1.VolumeSnapshotter{
+				"provider-1": &volumeSnapshotter{
+					snapshotVolumes: map[string]string{"snapshot-1": "new-volume"},
+				},
+			},
+			dataUploadResult: builder.ForConfigMap("velero", "test").ObjectMeta(builder.WithLabelsMap(map[string]string{
+				velerov1api.RestoreUIDLabel:       "fakeUID",
+				velerov1api.PVCNamespaceNameLabel: "velero.testPVC",
+				velerov1api.ResourceUsageLabel:    string(velerov1api.VeleroResourceUsageDataUploadResult),
+			})).Result(),
+			want: []*test.APIResource{},
+		},
+		{
+			name:    "when a PV has a DataUpload result CM, but CSI modules are not ready, the PV is not restored",
+			restore: defaultRestore().ObjectMeta(builder.WithUID("fakeUID")).Result(),
+			backup:  defaultBackup().Result(),
+			tarball: test.NewTarWriter(t).
+				AddItems("persistentvolumes",
+					builder.ForPersistentVolume("pv-1").
+						ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).
+						ClaimRef("velero", testPVCName).
+						Result(),
+				).
+				Done(),
+			apiResources: []*test.APIResource{
+				test.PVs(),
+				test.PVCs(),
+				test.ConfigMaps(),
+			},
+			volumeSnapshotLocations: []*velerov1api.VolumeSnapshotLocation{
+				builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "default").Provider("provider-1").Result(),
+			},
+			volumeSnapshotterGetter: map[string]vsv1.VolumeSnapshotter{
+				"provider-1": &volumeSnapshotter{
+					snapshotVolumes: map[string]string{"snapshot-1": "new-volume"},
+				},
+			},
+			dataUploadResult: builder.ForConfigMap("velero", "test").ObjectMeta(builder.WithLabelsMap(map[string]string{
+				velerov1api.RestoreUIDLabel:       "fakeUID",
+				velerov1api.PVCNamespaceNameLabel: "velero.testPVC",
+				velerov1api.ResourceUsageLabel:    string(velerov1api.VeleroResourceUsageDataUploadResult),
+			})).Result(),
+			want:                  []*test.APIResource{},
+			csiFeatureVerifierErr: "fake-feature-check-error",
+			wantError:             true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -2934,9 +3282,21 @@ func TestRestorePersistentVolumes(t *testing.T) {
 				return renamed, nil
 			}
 
+			verifierMock := new(verifiermocks.Verifier)
+			if tc.csiFeatureVerifierErr != "" {
+				verifierMock.On("Verify", mock.Anything, mock.Anything).Return(false, errors.New(tc.csiFeatureVerifierErr))
+			} else {
+				verifierMock.On("Verify", mock.Anything, mock.Anything).Return(true, nil)
+			}
+			h.restorer.featureVerifier = verifierMock
+
 			// set up the VolumeSnapshotLocation client and add test data to it
 			for _, vsl := range tc.volumeSnapshotLocations {
 				require.NoError(t, h.restorer.kbClient.Create(context.Background(), vsl))
+			}
+
+			if tc.dataUploadResult != nil {
+				require.NoError(t, h.restorer.kbClient.Create(context.TODO(), tc.dataUploadResult))
 			}
 
 			for _, r := range tc.apiResources {
@@ -2955,11 +3315,12 @@ func TestRestorePersistentVolumes(t *testing.T) {
 			}
 
 			data := &Request{
-				Log:             h.log,
-				Restore:         tc.restore,
-				Backup:          tc.backup,
-				VolumeSnapshots: tc.volumeSnapshots,
-				BackupReader:    tc.tarball,
+				Log:                h.log,
+				Restore:            tc.restore,
+				Backup:             tc.backup,
+				VolumeSnapshots:    tc.volumeSnapshots,
+				BackupReader:       tc.tarball,
+				CSIVolumeSnapshots: tc.csiVolumeSnapshots,
 			}
 			warnings, errs := h.restorer.Restore(
 				data,
@@ -3649,6 +4010,178 @@ func TestIsAlreadyExistsError(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Equal(t, test.expected, result)
+		})
+	}
+}
+
+func TestHasCSIVolumeSnapshot(t *testing.T) {
+	tests := []struct {
+		name           string
+		vs             *snapshotv1api.VolumeSnapshot
+		obj            *unstructured.Unstructured
+		expectedResult bool
+	}{
+		{
+			name: "Invalid PV, expect false.",
+			obj: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"kind": 1,
+				},
+			},
+			expectedResult: false,
+		},
+		{
+			name: "Cannot find VS, expect false",
+			obj: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"kind":       "PersistentVolume",
+					"apiVersion": "v1",
+					"metadata": map[string]interface{}{
+						"namespace": "default",
+						"name":      "test",
+					},
+				},
+			},
+			expectedResult: false,
+		},
+		{
+			name: "Find VS, expect true.",
+			obj: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"kind":       "PersistentVolume",
+					"apiVersion": "v1",
+					"metadata": map[string]interface{}{
+						"namespace": "velero",
+						"name":      "test",
+					},
+					"spec": map[string]interface{}{
+						"claimRef": map[string]interface{}{
+							"namespace": "velero",
+							"name":      "test",
+						},
+					},
+				},
+			},
+			vs:             builder.ForVolumeSnapshot("velero", "test").SourcePVC("test").Result(),
+			expectedResult: true,
+		},
+	}
+
+	for _, tc := range tests {
+		h := newHarness(t)
+
+		ctx := &restoreContext{
+			log: h.log,
+		}
+
+		if tc.vs != nil {
+			ctx.csiVolumeSnapshots = []*snapshotv1api.VolumeSnapshot{tc.vs}
+		}
+
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.expectedResult, hasCSIVolumeSnapshot(ctx, tc.obj))
+		})
+	}
+}
+
+func TestHasSnapshotDataUpload(t *testing.T) {
+	tests := []struct {
+		name           string
+		duResult       *corev1api.ConfigMap
+		obj            *unstructured.Unstructured
+		expectedResult bool
+		restore        *velerov1api.Restore
+	}{
+		{
+			name: "Invalid PV, expect false.",
+			obj: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"kind": 1,
+				},
+			},
+			expectedResult: false,
+		},
+		{
+			name: "PV without ClaimRef, expect false",
+			obj: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"kind":       "PersistentVolume",
+					"apiVersion": "v1",
+					"metadata": map[string]interface{}{
+						"namespace": "default",
+						"name":      "test",
+					},
+				},
+			},
+			duResult:       builder.ForConfigMap("velero", "test").Result(),
+			restore:        builder.ForRestore("velero", "test").ObjectMeta(builder.WithUID("fakeUID")).Result(),
+			expectedResult: false,
+		},
+		{
+			name: "Cannot find DataUploadResult CM, expect false",
+			obj: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"kind":       "PersistentVolume",
+					"apiVersion": "v1",
+					"metadata": map[string]interface{}{
+						"namespace": "default",
+						"name":      "test",
+					},
+					"spec": map[string]interface{}{
+						"claimRef": map[string]interface{}{
+							"namespace": "velero",
+							"name":      "testPVC",
+						},
+					},
+				},
+			},
+			duResult:       builder.ForConfigMap("velero", "test").Result(),
+			restore:        builder.ForRestore("velero", "test").ObjectMeta(builder.WithUID("fakeUID")).Result(),
+			expectedResult: false,
+		},
+		{
+			name: "Find DataUploadResult CM, expect true",
+			obj: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"kind":       "PersistentVolume",
+					"apiVersion": "v1",
+					"metadata": map[string]interface{}{
+						"namespace": "default",
+						"name":      "test",
+					},
+					"spec": map[string]interface{}{
+						"claimRef": map[string]interface{}{
+							"namespace": "velero",
+							"name":      "testPVC",
+						},
+					},
+				},
+			},
+			duResult: builder.ForConfigMap("velero", "test").ObjectMeta(builder.WithLabelsMap(map[string]string{
+				velerov1api.RestoreUIDLabel:       "fakeUID",
+				velerov1api.PVCNamespaceNameLabel: "velero/testPVC",
+				velerov1api.ResourceUsageLabel:    string(velerov1api.VeleroResourceUsageDataUploadResult),
+			})).Result(),
+			restore:        builder.ForRestore("velero", "test").ObjectMeta(builder.WithUID("fakeUID")).Result(),
+			expectedResult: false,
+		},
+	}
+
+	for _, tc := range tests {
+		h := newHarness(t)
+
+		ctx := &restoreContext{
+			log:      h.log,
+			kbClient: h.restorer.kbClient,
+			restore:  tc.restore,
+		}
+
+		if tc.duResult != nil {
+			require.NoError(t, ctx.kbClient.Create(context.TODO(), tc.duResult))
+		}
+
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.expectedResult, hasSnapshotDataUpload(ctx, tc.obj))
 		})
 	}
 }

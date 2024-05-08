@@ -18,6 +18,7 @@ package podexec
 
 import (
 	"bytes"
+	"context"
 	"net/url"
 	"time"
 
@@ -123,6 +124,12 @@ func (e *defaultPodCommandExecutor) ExecutePodCommand(log logrus.FieldLogger, it
 			"hookTimeout":   localHook.Timeout,
 		},
 	)
+
+	if pod.Status.Phase == corev1api.PodSucceeded || pod.Status.Phase == corev1api.PodFailed {
+		hookLog.Infof("Pod entered phase %s before some post-backup exec hooks ran", pod.Status.Phase)
+		return nil
+	}
+
 	hookLog.Info("running exec hook")
 
 	req := e.restClient.Post().
@@ -153,7 +160,7 @@ func (e *defaultPodCommandExecutor) ExecutePodCommand(log logrus.FieldLogger, it
 	errCh := make(chan error)
 
 	go func() {
-		err = executor.Stream(streamOptions)
+		err = executor.StreamWithContext(context.Background(), streamOptions)
 		errCh <- err
 	}()
 

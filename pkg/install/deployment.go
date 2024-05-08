@@ -41,14 +41,16 @@ type podTemplateConfig struct {
 	withSecret                      bool
 	defaultRepoMaintenanceFrequency time.Duration
 	garbageCollectionFrequency      time.Duration
+	podVolumeOperationTimeout       time.Duration
 	plugins                         []string
 	features                        []string
 	defaultVolumesToFsBackup        bool
 	serviceAccountName              string
 	uploaderType                    string
-	privilegedNodeAgent             bool
 	defaultSnapshotMoveData         bool
+	privilegedNodeAgent             bool
 	disableInformerCache            bool
+	scheduleSkipImmediately         bool
 }
 
 func WithImage(image string) podTemplateOption {
@@ -115,6 +117,12 @@ func WithGarbageCollectionFrequency(val time.Duration) podTemplateOption {
 	}
 }
 
+func WithPodVolumeOperationTimeout(val time.Duration) podTemplateOption {
+	return func(c *podTemplateConfig) {
+		c.podVolumeOperationTimeout = val
+	}
+}
+
 func WithPlugins(plugins []string) podTemplateOption {
 	return func(c *podTemplateConfig) {
 		c.plugins = plugins
@@ -163,6 +171,12 @@ func WithPrivilegedNodeAgent() podTemplateOption {
 	}
 }
 
+func WithScheduleSkipImmediately(b bool) podTemplateOption {
+	return func(c *podTemplateConfig) {
+		c.scheduleSkipImmediately = b
+	}
+}
+
 func Deployment(namespace string, opts ...podTemplateOption) *appsv1.Deployment {
 	// TODO: Add support for server args
 	c := &podTemplateConfig{
@@ -196,6 +210,10 @@ func Deployment(namespace string, opts ...podTemplateOption) *appsv1.Deployment 
 		args = append(args, "--disable-informer-cache=true")
 	}
 
+	if c.scheduleSkipImmediately {
+		args = append(args, "--schedule-skip-immediately=true")
+	}
+
 	if len(c.uploaderType) > 0 {
 		args = append(args, fmt.Sprintf("--uploader-type=%s", c.uploaderType))
 	}
@@ -210,6 +228,10 @@ func Deployment(namespace string, opts ...podTemplateOption) *appsv1.Deployment 
 
 	if c.garbageCollectionFrequency > 0 {
 		args = append(args, fmt.Sprintf("--garbage-collection-frequency=%v", c.garbageCollectionFrequency))
+	}
+
+	if c.podVolumeOperationTimeout > 0 {
+		args = append(args, fmt.Sprintf("--fs-backup-timeout=%v", c.podVolumeOperationTimeout))
 	}
 
 	deployment := &appsv1.Deployment{
