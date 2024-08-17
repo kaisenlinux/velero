@@ -2,8 +2,8 @@ Source: velero
 Section: admin
 Priority: optional
 Maintainer: Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>
-Build-Depends: debhelper-compat (= 13), golang-go (>= 1.20), dh-golang,
-Standards-Version: 4.6.0
+Build-Depends: debhelper-compat (= 13), golang-go (>= 1.22.2), dh-golang,
+Standards-Version: 4.7.2
 Homepage: https://velero.io/
 Vcs-Browser: https://gitlab.com/kaisenlinux/packages/velero
 Vcs-Git: https://gitlab.com/kaisenlinux/packages/velero.git

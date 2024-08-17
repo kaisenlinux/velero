@@ -22,12 +22,11 @@ import (
 
 	"github.com/vmware-tanzu/velero/internal/hook"
 	"github.com/vmware-tanzu/velero/internal/resourcepolicies"
-	internalVolume "github.com/vmware-tanzu/velero/internal/volume"
+	"github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/itemoperation"
 	"github.com/vmware-tanzu/velero/pkg/plugin/framework"
 	"github.com/vmware-tanzu/velero/pkg/util/collections"
-	"github.com/vmware-tanzu/velero/pkg/volume"
 )
 
 type itemKey struct {
@@ -53,11 +52,11 @@ type Request struct {
 	itemOperationsList        *[]*itemoperation.BackupOperation
 	ResPolicies               *resourcepolicies.Policies
 	SkippedPVTracker          *skipPVTracker
-	VolumesInformation        internalVolume.VolumesInformation
+	VolumesInformation        volume.BackupVolumesInformation
 }
 
-// VolumesInformation contains the information needs by generating
-// the backup VolumeInfo array.
+// BackupVolumesInformation contains the information needs by generating
+// the backup BackupVolumeInfo array.
 
 // GetItemOperationsList returns ItemOperationsList, initializing it if necessary
 func (r *Request) GetItemOperationsList() *[]*itemoperation.BackupOperation {

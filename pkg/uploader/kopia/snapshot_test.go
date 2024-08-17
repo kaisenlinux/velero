@@ -79,7 +79,6 @@ func MockFuncs(s *snapshotMockes, args []mockArgs) {
 }
 
 func TestSnapshotSource(t *testing.T) {
-
 	ctx := context.TODO()
 	sourceInfo := snapshot.SourceInfo{
 		UserName: "testUserName",
@@ -228,8 +227,8 @@ func TestReportSnapshotStatus(t *testing.T) {
 		},
 		{
 			shouldError:    true,
-			expectedResult: "",
-			expectedSize:   0,
+			expectedResult: "sample-manifest-id",
+			expectedSize:   1024,
 			directorySummary: &fs.DirectorySummary{
 				FailedEntries: []*fs.EntryWithError{
 					{
@@ -610,7 +609,7 @@ func TestBackup(t *testing.T) {
 			name:          "Unable to read directory",
 			sourcePath:    "/invalid/path",
 			tags:          nil,
-			expectedError: errors.New("Unable to read dir"),
+			expectedError: errors.New("no such file or directory"),
 		},
 		{
 			name:          "Source path is not a block device",

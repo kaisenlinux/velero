@@ -325,13 +325,13 @@ OrderedResources:
 func TestDescribeNativeSnapshots(t *testing.T) {
 	testcases := []struct {
 		name         string
-		volumeInfo   []*volume.VolumeInfo
+		volumeInfo   []*volume.BackupVolumeInfo
 		inputDetails bool
 		expect       string
 	}{
 		{
 			name: "no details",
-			volumeInfo: []*volume.VolumeInfo{
+			volumeInfo: []*volume.BackupVolumeInfo{
 				{
 					BackupMethod: volume.NativeSnapshot,
 					PVName:       "pv-1",
@@ -349,7 +349,7 @@ func TestDescribeNativeSnapshots(t *testing.T) {
 		},
 		{
 			name: "details",
-			volumeInfo: []*volume.VolumeInfo{
+			volumeInfo: []*volume.BackupVolumeInfo{
 				{
 					BackupMethod: volume.NativeSnapshot,
 					PVName:       "pv-1",
@@ -390,27 +390,27 @@ func TestDescribeNativeSnapshots(t *testing.T) {
 func TestCSISnapshots(t *testing.T) {
 	testcases := []struct {
 		name             string
-		volumeInfo       []*volume.VolumeInfo
+		volumeInfo       []*volume.BackupVolumeInfo
 		inputDetails     bool
 		expect           string
 		legacyInfoSource bool
 	}{
 		{
 			name:       "empty info, not legacy",
-			volumeInfo: []*volume.VolumeInfo{},
+			volumeInfo: []*volume.BackupVolumeInfo{},
 			expect: `  CSI Snapshots: <none included>
 `,
 		},
 		{
 			name:             "empty info, legacy",
-			volumeInfo:       []*volume.VolumeInfo{},
+			volumeInfo:       []*volume.BackupVolumeInfo{},
 			legacyInfoSource: true,
 			expect: `  CSI Snapshots: <none included or not detectable>
 `,
 		},
 		{
 			name: "no details, local snapshot",
-			volumeInfo: []*volume.VolumeInfo{
+			volumeInfo: []*volume.BackupVolumeInfo{
 				{
 					BackupMethod:          volume.CSISnapshot,
 					PVCNamespace:          "pvc-ns-1",
@@ -432,7 +432,7 @@ func TestCSISnapshots(t *testing.T) {
 		},
 		{
 			name: "details, local snapshot",
-			volumeInfo: []*volume.VolumeInfo{
+			volumeInfo: []*volume.BackupVolumeInfo{
 				{
 					BackupMethod:          volume.CSISnapshot,
 					PVCNamespace:          "pvc-ns-2",
@@ -460,7 +460,7 @@ func TestCSISnapshots(t *testing.T) {
 		},
 		{
 			name: "no details, data movement",
-			volumeInfo: []*volume.VolumeInfo{
+			volumeInfo: []*volume.BackupVolumeInfo{
 				{
 					BackupMethod:      volume.CSISnapshot,
 					PVCNamespace:      "pvc-ns-3",
@@ -481,7 +481,7 @@ func TestCSISnapshots(t *testing.T) {
 		},
 		{
 			name: "details, data movement",
-			volumeInfo: []*volume.VolumeInfo{
+			volumeInfo: []*volume.BackupVolumeInfo{
 				{
 					BackupMethod:      volume.CSISnapshot,
 					PVCNamespace:      "pvc-ns-4",
@@ -502,11 +502,12 @@ func TestCSISnapshots(t *testing.T) {
         Operation ID: fake-operation-4
         Data Mover: velero
         Uploader Type: fake-uploader
+        Moved data Size (bytes): 0
 `,
 		},
 		{
 			name: "details, data movement, data mover is empty",
-			volumeInfo: []*volume.VolumeInfo{
+			volumeInfo: []*volume.BackupVolumeInfo{
 				{
 					BackupMethod:      volume.CSISnapshot,
 					PVCNamespace:      "pvc-ns-5",
@@ -516,6 +517,7 @@ func TestCSISnapshots(t *testing.T) {
 						UploaderType:   "fake-uploader",
 						SnapshotHandle: "fake-repo-id-5",
 						OperationID:    "fake-operation-5",
+						Size:           100,
 					},
 				},
 			},
@@ -526,6 +528,7 @@ func TestCSISnapshots(t *testing.T) {
         Operation ID: fake-operation-5
         Data Mover: velero
         Uploader Type: fake-uploader
+        Moved data Size (bytes): 100
 `,
 		},
 	}

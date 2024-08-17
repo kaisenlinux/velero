@@ -18,7 +18,6 @@ limitations under the License.
 
 //the ordered resources test related to https://github.com/vmware-tanzu/velero/issues/4561
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -30,7 +29,6 @@ import (
 	kbclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
-	. "github.com/vmware-tanzu/velero/test"
 	. "github.com/vmware-tanzu/velero/test/e2e/test"
 	. "github.com/vmware-tanzu/velero/test/util/k8s"
 	. "github.com/vmware-tanzu/velero/test/util/velero"
@@ -51,8 +49,6 @@ func (o *OrderedResources) Init() error {
 	o.CaseBaseName = "ordered-resources-" + o.UUIDgen
 	o.ScheduleName = "schedule-" + o.CaseBaseName
 	o.Namespace = o.CaseBaseName + "-" + o.UUIDgen
-	o.VeleroCfg = VeleroCfg
-	o.Client = *o.VeleroCfg.ClientToInstallVelero
 	o.OrderMap = map[string]string{
 		"deployments": fmt.Sprintf("deploy-%s", o.CaseBaseName),
 		"secrets":     fmt.Sprintf("secret-%s", o.CaseBaseName),
@@ -73,9 +69,7 @@ func (o *OrderedResources) Init() error {
 
 	return nil
 }
-
 func (o *OrderedResources) CreateResources() error {
-	o.Ctx, o.CtxCancel = context.WithTimeout(context.Background(), 10*time.Minute)
 	label := map[string]string{
 		"orderedresources": "true",
 	}

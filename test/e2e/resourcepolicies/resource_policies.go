@@ -17,10 +17,8 @@ limitations under the License.
 package filtering
 
 import (
-	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -76,14 +74,12 @@ func (r *ResourcePoliciesCase) Init() error {
 
 	// assign values to the inner variable for specific case
 	r.yamlConfig = yamlData
-	r.VeleroCfg = VeleroCfg
-	r.Client = *r.VeleroCfg.ClientToInstallVelero
 	r.VeleroCfg.UseVolumeSnapshots = false
 	r.VeleroCfg.UseNodeAgent = true
 
 	// NEED explicitly specify the value of the variables for snapshot-volumes or default-volumes-to-fs-backup
 	r.BackupArgs = []string{
-		"create", "--namespace", VeleroCfg.VeleroNamespace, "backup", r.BackupName,
+		"create", "--namespace", r.VeleroCfg.VeleroNamespace, "backup", r.BackupName,
 		"--resource-policies-configmap", r.cmName,
 		"--include-namespaces", strings.Join(*r.NSIncluded, ","),
 		"--default-volumes-to-fs-backup",
@@ -91,7 +87,7 @@ func (r *ResourcePoliciesCase) Init() error {
 	}
 
 	r.RestoreArgs = []string{
-		"create", "--namespace", VeleroCfg.VeleroNamespace, "restore", r.RestoreName,
+		"create", "--namespace", r.VeleroCfg.VeleroNamespace, "restore", r.RestoreName,
 		"--from-backup", r.BackupName, "--wait",
 	}
 
@@ -105,11 +101,8 @@ func (r *ResourcePoliciesCase) Init() error {
 }
 
 func (r *ResourcePoliciesCase) CreateResources() error {
-	// It's better to set a global timeout in CreateResources function which is the real beginning of one e2e test
-	r.Ctx, r.CtxCancel = context.WithTimeout(context.Background(), 10*time.Minute)
-
 	By(("Installing storage class..."), func() {
-		Expect(InstallTestStorageClasses(fmt.Sprintf("../testdata/storage-class/%s.yaml", VeleroCfg.CloudProvider))).To(Succeed(), "Failed to install storage class")
+		Expect(InstallTestStorageClasses(fmt.Sprintf("../testdata/storage-class/%s.yaml", r.VeleroCfg.CloudProvider))).To(Succeed(), "Failed to install storage class")
 	})
 
 	By(fmt.Sprintf("Create configmap %s in namespaces %s for workload\n", r.cmName, r.VeleroCfg.VeleroNamespace), func() {
@@ -173,13 +166,12 @@ func (r *ResourcePoliciesCase) Verify() error {
 						content = strings.Replace(content, "\n", "", -1)
 						originContent := strings.Replace(fmt.Sprintf("ns-%s pod-%s volume-%s", ns, pod.Name, vol.Name), "\n", "", -1)
 
-						Expect(content == originContent).To(BeTrue(), fmt.Sprintf("File %s does not exist in volume %s of pod %s in namespace %s",
+						Expect(content).To(Equal(originContent), fmt.Sprintf("File %s does not exist in volume %s of pod %s in namespace %s",
 							FileName, vol.Name, pod.Name, ns))
 					}
 				}
 			}
 		})
-
 	}
 	return nil
 }

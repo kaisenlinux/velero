@@ -61,8 +61,8 @@ func BslDeletionTest(useVolumeSnapshots bool) {
 	less := func(a, b string) bool { return a < b }
 
 	BeforeEach(func() {
-		if useVolumeSnapshots && veleroCfg.CloudProvider == "kind" {
-			Skip("Volume snapshots not supported on kind")
+		if useVolumeSnapshots && veleroCfg.CloudProvider == Kind {
+			Skip(fmt.Sprintf("Volume snapshots not supported on %s", Kind))
 		}
 		var err error
 		flag.Parse()
@@ -76,7 +76,8 @@ func BslDeletionTest(useVolumeSnapshots bool) {
 	AfterEach(func() {
 		if !veleroCfg.Debug {
 			By("Clean backups after test", func() {
-				DeleteAllBackups(context.Background(), *veleroCfg.DefaultClient)
+				veleroCfg.ClientToInstallVelero = veleroCfg.DefaultClient
+				DeleteAllBackups(context.Background(), &veleroCfg)
 			})
 			By(fmt.Sprintf("Delete sample workload namespace %s", bslDeletionTestNs), func() {
 				Expect(DeleteNamespace(context.Background(), *veleroCfg.ClientToInstallVelero, bslDeletionTestNs,
@@ -162,12 +163,12 @@ func BslDeletionTest(useVolumeSnapshots bool) {
 				pvc, err := GetPvcByPVCName(context.Background(), bslDeletionTestNs, podName_1)
 				Expect(err).To(Succeed())
 				fmt.Println(pvc)
-				Expect(len(pvc)).To(Equal(1))
+				Expect(pvc).To(HaveLen(1))
 				pvc1 := pvc[0]
 				pvc, err = GetPvcByPVCName(context.Background(), bslDeletionTestNs, podName_2)
 				Expect(err).To(Succeed())
 				fmt.Println(pvc)
-				Expect(len(pvc)).To(Equal(1))
+				Expect(pvc).To(HaveLen(1))
 				pvc2 := pvc[0]
 				Expect(AddLabelToPvc(context.Background(), pvc1, bslDeletionTestNs, label_1)).To(Succeed())
 				Expect(AddLabelToPvc(context.Background(), pvc2, bslDeletionTestNs, label_2)).To(Succeed())
@@ -202,7 +203,7 @@ func BslDeletionTest(useVolumeSnapshots bool) {
 			})
 
 			if useVolumeSnapshots {
-				if veleroCfg.CloudProvider == "vsphere" {
+				if veleroCfg.CloudProvider == Vsphere {
 					// TODO - remove after upload progress monitoring is implemented
 					By("Waiting for vSphere uploads to complete", func() {
 						Expect(WaitForVSphereUploadCompletion(oneHourTimeout, time.Hour,
@@ -217,32 +218,33 @@ func BslDeletionTest(useVolumeSnapshots bool) {
 							backupName_2, 1)).To(Succeed())
 					})
 				}
+				if veleroCfg.CloudProvider != VanillaZFS {
+					var snapshotCheckPoint SnapshotCheckPoint
+					snapshotCheckPoint.NamespaceBackedUp = bslDeletionTestNs
+					By(fmt.Sprintf("Snapshot of bsl %s should be created in cloud object store", backupLocation_1), func() {
+						snapshotCheckPoint, err = GetSnapshotCheckPoint(*veleroCfg.ClientToInstallVelero, veleroCfg, 1, bslDeletionTestNs, backupName_1, []string{podName_1})
+						Expect(err).NotTo(HaveOccurred(), "Fail to get Azure CSI snapshot checkpoint")
+						Expect(SnapshotsShouldBeCreatedInCloud(veleroCfg.CloudProvider,
+							veleroCfg.CloudCredentialsFile, veleroCfg.BSLBucket,
+							veleroCfg.BSLConfig, backupName_1, snapshotCheckPoint)).To(Succeed())
+					})
+					By(fmt.Sprintf("Snapshot of bsl %s should be created in cloud object store", backupLocation_2), func() {
+						snapshotCheckPoint, err = GetSnapshotCheckPoint(*veleroCfg.ClientToInstallVelero, veleroCfg, 1, bslDeletionTestNs, backupName_2, []string{podName_2})
+						Expect(err).NotTo(HaveOccurred(), "Fail to get snapshot checkpoint")
+						var BSLCredentials, BSLConfig string
+						if veleroCfg.CloudProvider == Vsphere {
+							BSLCredentials = veleroCfg.AdditionalBSLCredentials
+							BSLConfig = veleroCfg.AdditionalBSLConfig
+						} else { // Snapshotting with non-vSphere provider has nothing to do with BSL
+							BSLCredentials = veleroCfg.CloudCredentialsFile
+							BSLConfig = veleroCfg.BSLConfig
+						}
 
-				var snapshotCheckPoint SnapshotCheckPoint
-				snapshotCheckPoint.NamespaceBackedUp = bslDeletionTestNs
-				By(fmt.Sprintf("Snapshot of bsl %s should be created in cloud object store", backupLocation_1), func() {
-					snapshotCheckPoint, err = GetSnapshotCheckPoint(*veleroCfg.ClientToInstallVelero, veleroCfg, 1, bslDeletionTestNs, backupName_1, []string{podName_1})
-					Expect(err).NotTo(HaveOccurred(), "Fail to get Azure CSI snapshot checkpoint")
-					Expect(SnapshotsShouldBeCreatedInCloud(veleroCfg.CloudProvider,
-						veleroCfg.CloudCredentialsFile, veleroCfg.BSLBucket,
-						veleroCfg.BSLConfig, backupName_1, snapshotCheckPoint)).To(Succeed())
-				})
-				By(fmt.Sprintf("Snapshot of bsl %s should be created in cloud object store", backupLocation_2), func() {
-					snapshotCheckPoint, err = GetSnapshotCheckPoint(*veleroCfg.ClientToInstallVelero, veleroCfg, 1, bslDeletionTestNs, backupName_2, []string{podName_2})
-					Expect(err).NotTo(HaveOccurred(), "Fail to get Azure CSI snapshot checkpoint")
-					var BSLCredentials, BSLConfig string
-					if veleroCfg.CloudProvider == "vsphere" {
-						BSLCredentials = veleroCfg.AdditionalBSLCredentials
-						BSLConfig = veleroCfg.AdditionalBSLConfig
-					} else { // Snapshotting with non-vSphere provider has nothing to do with BSL
-						BSLCredentials = veleroCfg.CloudCredentialsFile
-						BSLConfig = veleroCfg.BSLConfig
-					}
-
-					Expect(SnapshotsShouldBeCreatedInCloud(veleroCfg.CloudProvider,
-						BSLCredentials, veleroCfg.AdditionalBSLBucket,
-						BSLConfig, backupName_2, snapshotCheckPoint)).To(Succeed())
-				})
+						Expect(SnapshotsShouldBeCreatedInCloud(veleroCfg.CloudProvider,
+							BSLCredentials, veleroCfg.AdditionalBSLBucket,
+							BSLConfig, backupName_2, snapshotCheckPoint)).To(Succeed())
+					})
+				}
 			} else { // For Restics
 				By(fmt.Sprintf("Resticrepositories for BSL %s should be created in Velero namespace", backupLocation_1), func() {
 					Expect(BackupRepositoriesCountShouldBe(context.Background(),
@@ -255,13 +257,13 @@ func BslDeletionTest(useVolumeSnapshots bool) {
 			}
 
 			By(fmt.Sprintf("Backup 1 %s should be created.", backupName_1), func() {
-				Expect(WaitForBackupToBeCreated(context.Background(), veleroCfg.VeleroCLI,
-					backupName_1, 10*time.Minute)).To(Succeed())
+				Expect(WaitForBackupToBeCreated(context.Background(),
+					backupName_1, 10*time.Minute, &veleroCfg)).To(Succeed())
 			})
 
 			By(fmt.Sprintf("Backup 2 %s should be created.", backupName_2), func() {
-				Expect(WaitForBackupToBeCreated(context.Background(), veleroCfg.VeleroCLI,
-					backupName_2, 10*time.Minute)).To(Succeed())
+				Expect(WaitForBackupToBeCreated(context.Background(),
+					backupName_2, 10*time.Minute, &veleroCfg)).To(Succeed())
 			})
 
 			backupsInBSL1, err := GetBackupsFromBsl(context.Background(), veleroCfg.VeleroCLI, backupLocation_1)
@@ -276,14 +278,14 @@ func BslDeletionTest(useVolumeSnapshots bool) {
 				Expect(cmp.Diff(backupsInBsl1AndBsl2, backupsBeforeDel, cmpopts.SortSlices(less))).Should(BeEmpty())
 
 				By(fmt.Sprintf("Backup1 %s should exist in cloud object store before bsl deletion", backupName_1), func() {
-					Expect(ObjectsShouldBeInBucket(veleroCfg.CloudProvider, veleroCfg.CloudCredentialsFile,
+					Expect(ObjectsShouldBeInBucket(veleroCfg.ObjectStoreProvider, veleroCfg.CloudCredentialsFile,
 						veleroCfg.BSLBucket, veleroCfg.BSLPrefix, veleroCfg.BSLConfig,
 						backupName_1, BackupObjectsPrefix)).To(Succeed())
 				})
 
 				By(fmt.Sprintf("Delete one of backup locations - %s", backupLocation_1), func() {
 					Expect(DeleteBslResource(context.Background(), veleroCfg.VeleroCLI, backupLocation_1)).To(Succeed())
-					Expect(WaitForBackupsToBeDeleted(context.Background(), veleroCfg.VeleroCLI, backupsInBSL1, 10*time.Minute)).To(Succeed())
+					Expect(WaitForBackupsToBeDeleted(context.Background(), backupsInBSL1, 10*time.Minute, &veleroCfg)).To(Succeed())
 				})
 
 				By("Get all backups from 2 BSLs after deleting one of them", func() {
@@ -295,20 +297,20 @@ func BslDeletionTest(useVolumeSnapshots bool) {
 			})
 
 			By(fmt.Sprintf("Backup1 %s should still exist in cloud object store after bsl deletion", backupName_1), func() {
-				Expect(ObjectsShouldBeInBucket(veleroCfg.CloudProvider, veleroCfg.CloudCredentialsFile,
+				Expect(ObjectsShouldBeInBucket(veleroCfg.ObjectStoreProvider, veleroCfg.CloudCredentialsFile,
 					veleroCfg.BSLBucket, veleroCfg.BSLPrefix, veleroCfg.BSLConfig,
 					backupName_1, BackupObjectsPrefix)).To(Succeed())
 			})
 
 			// TODO: Choose additional BSL to be deleted as an new test case
 			// By(fmt.Sprintf("Backup %s should still exist in cloud object store", backupName_2), func() {
-			// 	Expect(ObjectsShouldBeInBucket(veleroCfg.CloudProvider, veleroCfg.AdditionalBSLCredentials,
+			// 	Expect(ObjectsShouldBeInBucket(veleroCfg.ObjectStoreProvider, veleroCfg.AdditionalBSLCredentials,
 			// 		veleroCfg.AdditionalBSLBucket, veleroCfg.AdditionalBSLPrefix, veleroCfg.AdditionalBSLConfig,
 			// 		backupName_2, BackupObjectsPrefix)).To(Succeed())
 			// })
 
 			if useVolumeSnapshots {
-				if veleroCfg.CloudProvider == "vsphere" {
+				if veleroCfg.CloudProvider == Vsphere {
 					By(fmt.Sprintf("Snapshot in backup %s should still exist, because snapshot CR will be deleted 24 hours later if the status is a success", backupName_2), func() {
 						Expect(SnapshotCRsCountShouldBe(context.Background(), bslDeletionTestNs,
 							backupName_1, 1)).To(Succeed())
@@ -319,7 +321,6 @@ func BslDeletionTest(useVolumeSnapshots bool) {
 				var snapshotCheckPoint SnapshotCheckPoint
 				snapshotCheckPoint.NamespaceBackedUp = bslDeletionTestNs
 				By(fmt.Sprintf("Snapshot should not be deleted in cloud object store after deleting bsl %s", backupLocation_1), func() {
-
 					snapshotCheckPoint, err = GetSnapshotCheckPoint(*veleroCfg.ClientToInstallVelero, veleroCfg, 1, bslDeletionTestNs, backupName_1, []string{podName_1})
 					Expect(err).NotTo(HaveOccurred(), "Fail to get Azure CSI snapshot checkpoint")
 					Expect(SnapshotsShouldBeCreatedInCloud(veleroCfg.CloudProvider,
@@ -328,7 +329,7 @@ func BslDeletionTest(useVolumeSnapshots bool) {
 				})
 				By(fmt.Sprintf("Snapshot should not be deleted in cloud object store after deleting bsl %s", backupLocation_2), func() {
 					var BSLCredentials, BSLConfig string
-					if veleroCfg.CloudProvider == "vsphere" {
+					if veleroCfg.CloudProvider == Vsphere {
 						BSLCredentials = veleroCfg.AdditionalBSLCredentials
 						BSLConfig = veleroCfg.AdditionalBSLConfig
 					} else {

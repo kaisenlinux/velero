@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appv1 "k8s.io/api/apps/v1"
@@ -33,6 +35,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/builder"
 	"github.com/vmware-tanzu/velero/pkg/repository"
@@ -409,7 +412,6 @@ func TestRestorePodVolumes(t *testing.T) {
 					for _, pvr := range test.retPVRs {
 						rs.(*restorer).results[resultsKey(test.restoredPod.Namespace, test.restoredPod.Name)] <- pvr
 					}
-
 				}
 			}()
 
@@ -419,7 +421,7 @@ func TestRestorePodVolumes(t *testing.T) {
 				PodVolumeBackups: test.pvbs,
 				SourceNamespace:  test.sourceNamespace,
 				BackupLocation:   test.bsl,
-			})
+			}, volume.NewRestoreVolInfoTracker(restoreObj, logrus.New(), fakeCRClient))
 
 			if errs == nil {
 				assert.Nil(t, test.errs)

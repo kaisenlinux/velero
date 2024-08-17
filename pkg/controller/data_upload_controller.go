@@ -48,6 +48,7 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/datapath"
 	"github.com/vmware-tanzu/velero/pkg/exposer"
 	"github.com/vmware-tanzu/velero/pkg/metrics"
+	"github.com/vmware-tanzu/velero/pkg/nodeagent"
 	"github.com/vmware-tanzu/velero/pkg/repository"
 	"github.com/vmware-tanzu/velero/pkg/uploader"
 	"github.com/vmware-tanzu/velero/pkg/util/filesystem"
@@ -74,12 +75,13 @@ type DataUploadReconciler struct {
 	logger              logrus.FieldLogger
 	snapshotExposerList map[velerov2alpha1api.SnapshotType]exposer.SnapshotExposer
 	dataPathMgr         *datapath.Manager
+	loadAffinity        *nodeagent.LoadAffinity
 	preparingTimeout    time.Duration
 	metrics             *metrics.ServerMetrics
 }
 
 func NewDataUploadReconciler(client client.Client, kubeClient kubernetes.Interface, csiSnapshotClient snapshotter.SnapshotV1Interface,
-	dataPathMgr *datapath.Manager, repoEnsurer *repository.Ensurer, clock clocks.WithTickerAndDelayedExecution,
+	dataPathMgr *datapath.Manager, loadAffinity *nodeagent.LoadAffinity, repoEnsurer *repository.Ensurer, clock clocks.WithTickerAndDelayedExecution,
 	cred *credentials.CredentialGetter, nodeName string, fs filesystem.Interface, preparingTimeout time.Duration, log logrus.FieldLogger, metrics *metrics.ServerMetrics) *DataUploadReconciler {
 	return &DataUploadReconciler{
 		client:              client,
@@ -93,6 +95,7 @@ func NewDataUploadReconciler(client client.Client, kubeClient kubernetes.Interfa
 		repoEnsurer:         repoEnsurer,
 		snapshotExposerList: map[velerov2alpha1api.SnapshotType]exposer.SnapshotExposer{velerov2alpha1api.SnapshotTypeCSI: exposer.NewCSISnapshotExposer(kubeClient, csiSnapshotClient, log)},
 		dataPathMgr:         dataPathMgr,
+		loadAffinity:        loadAffinity,
 		preparingTimeout:    preparingTimeout,
 		metrics:             metrics,
 	}
@@ -224,7 +227,10 @@ func (r *DataUploadReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			// we don't want to update CR into cancel status forcely as it may conflict with CR update in Expose action
 			// we could retry when the CR requeue in periodcally
 			log.Debugf("Data upload is been canceled %s in Phase %s", du.GetName(), du.Status.Phase)
-			r.TryCancelDataUpload(ctx, du)
+			r.TryCancelDataUpload(ctx, du, "")
+		} else if peekErr := ep.PeekExposed(ctx, getOwnerObject(du)); peekErr != nil {
+			r.TryCancelDataUpload(ctx, du, fmt.Sprintf("found a dataupload %s/%s with expose error: %s. mark it as cancel", du.Namespace, du.Name, peekErr))
+			log.Errorf("Cancel du %s/%s because of expose error %s", du.Namespace, du.Name, peekErr)
 		} else if du.Status.StartTimestamp != nil {
 			if time.Since(du.Status.StartTimestamp.Time) >= r.preparingTimeout {
 				r.onPrepareTimeout(ctx, du)
@@ -276,6 +282,7 @@ func (r *DataUploadReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		// Update status to InProgress
 		original := du.DeepCopy()
 		du.Status.Phase = velerov2alpha1api.DataUploadPhaseInProgress
+		du.Status.StartTimestamp = &metav1.Time{Time: r.Clock.Now()}
 		if err := r.client.Patch(ctx, du, client.MergeFrom(original)); err != nil {
 			return r.errorOut(ctx, du, err, "error updating dataupload status", log)
 		}
@@ -294,7 +301,11 @@ func (r *DataUploadReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 			fsBackup := r.dataPathMgr.GetAsyncBR(du.Name)
 			if fsBackup == nil {
-				r.OnDataUploadCancelled(ctx, du.GetNamespace(), du.GetName())
+				if du.Status.Node == r.nodeName {
+					r.OnDataUploadCancelled(ctx, du.GetNamespace(), du.GetName())
+				} else {
+					log.Info("Data path is not started in this node and will not canceled by current node")
+				}
 				return ctrl.Result{}, nil
 			}
 
@@ -343,7 +354,7 @@ func (r *DataUploadReconciler) runCancelableDataUpload(ctx context.Context, fsBa
 		velerov1api.AsyncOperationIDLabel: du.Labels[velerov1api.AsyncOperationIDLabel],
 	}
 
-	if err := fsBackup.StartBackup(path, fmt.Sprintf("%s/%s", du.Spec.SourceNamespace, du.Spec.SourcePVC), "", false, tags, du.Spec.DataMoverConfig); err != nil {
+	if err := fsBackup.StartBackup(path, datamover.GetRealSource(du.Spec.SourceNamespace, du.Spec.SourcePVC), "", false, tags, du.Spec.DataMoverConfig); err != nil {
 		return r.errorOut(ctx, du, err, "error starting data path backup", log)
 	}
 
@@ -395,7 +406,7 @@ func (r *DataUploadReconciler) OnDataUploadCompleted(ctx context.Context, namesp
 	}
 }
 
-func (r *DataUploadReconciler) OnDataUploadFailed(ctx context.Context, namespace string, duName string, err error) {
+func (r *DataUploadReconciler) OnDataUploadFailed(ctx context.Context, namespace, duName string, err error) {
 	defer r.closeDataPath(ctx, duName)
 
 	log := r.logger.WithField("dataupload", duName)
@@ -440,7 +451,7 @@ func (r *DataUploadReconciler) OnDataUploadCancelled(ctx context.Context, namesp
 }
 
 // TryCancelDataUpload clear up resources only when update success
-func (r *DataUploadReconciler) TryCancelDataUpload(ctx context.Context, du *velerov2alpha1api.DataUpload) {
+func (r *DataUploadReconciler) TryCancelDataUpload(ctx context.Context, du *velerov2alpha1api.DataUpload, message string) {
 	log := r.logger.WithField("dataupload", du.Name)
 	log.Warn("Async fs backup data path canceled")
 	succeeded, err := r.exclusiveUpdateDataUpload(ctx, du, func(dataUpload *velerov2alpha1api.DataUpload) {
@@ -449,6 +460,7 @@ func (r *DataUploadReconciler) TryCancelDataUpload(ctx context.Context, du *vele
 			dataUpload.Status.StartTimestamp = &metav1.Time{Time: r.Clock.Now()}
 		}
 		dataUpload.Status.CompletionTimestamp = &metav1.Time{Time: r.Clock.Now()}
+		dataUpload.Status.Message = message
 	})
 
 	if err != nil {
@@ -691,6 +703,9 @@ func (r *DataUploadReconciler) updateStatusToFailed(ctx context.Context, du *vel
 		du.Status.StartTimestamp = &metav1.Time{Time: r.Clock.Now()}
 	}
 
+	if dataPathError, ok := err.(datapath.DataPathError); ok {
+		du.Status.SnapshotID = dataPathError.GetSnapshotID()
+	}
 	du.Status.CompletionTimestamp = &metav1.Time{Time: r.Clock.Now()}
 	if patchErr := r.client.Patch(ctx, du, client.MergeFrom(original)); patchErr != nil {
 		log.WithError(patchErr).Error("error updating DataUpload status")
@@ -710,7 +725,6 @@ func (r *DataUploadReconciler) acceptDataUpload(ctx context.Context, du *velerov
 
 	updateFunc := func(dataUpload *velerov2alpha1api.DataUpload) {
 		dataUpload.Status.Phase = velerov2alpha1api.DataUploadPhaseAccepted
-		dataUpload.Status.StartTimestamp = &metav1.Time{Time: r.Clock.Now()}
 		labels := dataUpload.GetLabels()
 		if labels == nil {
 			labels = make(map[string]string)
@@ -825,6 +839,7 @@ func (r *DataUploadReconciler) setupExposeParam(du *velerov2alpha1api.DataUpload
 			OperationTimeout: du.Spec.OperationTimeout.Duration,
 			ExposeTimeout:    r.preparingTimeout,
 			VolumeSize:       pvc.Spec.Resources.Requests[corev1.ResourceStorage],
+			Affinity:         r.loadAffinity,
 		}, nil
 	}
 	return nil, nil

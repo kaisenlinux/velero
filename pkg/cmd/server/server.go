@@ -32,6 +32,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1api "k8s.io/api/batch/v1"
 	corev1api "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -52,6 +54,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/vmware-tanzu/velero/internal/credentials"
+	"github.com/vmware-tanzu/velero/internal/hook"
 	"github.com/vmware-tanzu/velero/internal/storage"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	velerov2alpha1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
@@ -90,8 +93,8 @@ const (
 	defaultResourceTerminatingTimeout = 10 * time.Minute
 
 	// server's client default qps and burst
-	defaultClientQPS      float32 = 20.0
-	defaultClientBurst    int     = 30
+	defaultClientQPS      float32 = 100.0
+	defaultClientBurst    int     = 100
 	defaultClientPageSize int     = 500
 
 	defaultProfilerAddress = "localhost:6060"
@@ -136,6 +139,7 @@ type serverConfig struct {
 	defaultSnapshotMoveData                                                 bool
 	disableInformerCache                                                    bool
 	scheduleSkipImmediately                                                 bool
+	maintenanceCfg                                                          repository.MaintenanceConfig
 }
 
 func NewCommand(f client.Factory) *cobra.Command {
@@ -167,6 +171,9 @@ func NewCommand(f client.Factory) *cobra.Command {
 			defaultSnapshotMoveData:        false,
 			disableInformerCache:           defaultDisableInformerCache,
 			scheduleSkipImmediately:        false,
+			maintenanceCfg: repository.MaintenanceConfig{
+				KeepLatestMaitenanceJobs: repository.DefaultKeepLatestMaitenanceJobs,
+			},
 		}
 	)
 
@@ -240,7 +247,15 @@ func NewCommand(f client.Factory) *cobra.Command {
 	command.Flags().BoolVar(&config.defaultSnapshotMoveData, "default-snapshot-move-data", config.defaultSnapshotMoveData, "Move data by default for all snapshots supporting data movement.")
 	command.Flags().BoolVar(&config.disableInformerCache, "disable-informer-cache", config.disableInformerCache, "Disable informer cache for Get calls on restore. With this enabled, it will speed up restore in cases where there are backup resources which already exist in the cluster, but for very large clusters this will increase velero memory usage. Default is false (don't disable).")
 	command.Flags().BoolVar(&config.scheduleSkipImmediately, "schedule-skip-immediately", config.scheduleSkipImmediately, "Skip the first scheduled backup immediately after creating a schedule. Default is false (don't skip).")
+	command.Flags().IntVar(&config.maintenanceCfg.KeepLatestMaitenanceJobs, "keep-latest-maintenance-jobs", config.maintenanceCfg.KeepLatestMaitenanceJobs, "Number of latest maintenance jobs to keep each repository. Optional.")
+	command.Flags().StringVar(&config.maintenanceCfg.CPURequest, "maintenance-job-cpu-request", config.maintenanceCfg.CPURequest, "CPU request for maintenance job. Default is no limit.")
+	command.Flags().StringVar(&config.maintenanceCfg.MemRequest, "maintenance-job-mem-request", config.maintenanceCfg.MemRequest, "Memory request for maintenance job. Default is no limit.")
+	command.Flags().StringVar(&config.maintenanceCfg.CPULimit, "maintenance-job-cpu-limit", config.maintenanceCfg.CPULimit, "CPU limit for maintenance job. Default is no limit.")
+	command.Flags().StringVar(&config.maintenanceCfg.MemLimit, "maintenance-job-mem-limit", config.maintenanceCfg.MemLimit, "Memory limit for maintenance job. Default is no limit.")
 
+	// maintenance job log setting inherited from velero server
+	config.maintenanceCfg.FormatFlag = config.formatFlag
+	config.maintenanceCfg.LogLevelFlag = logLevelFlag
 	return command
 }
 
@@ -270,7 +285,6 @@ type server struct {
 	mgr                   manager.Manager
 	credentialFileStore   credentials.FileStore
 	credentialSecretStore credentials.SecretStore
-	featureVerifier       features.Verifier
 }
 
 func newServer(f client.Factory, config serverConfig, logger *logrus.Logger) (*server, error) {
@@ -312,12 +326,6 @@ func newServer(f client.Factory, config serverConfig, logger *logrus.Logger) (*s
 		return nil, err
 	}
 
-	featureVerifier := features.NewVerifier(pluginRegistry)
-
-	if _, err := featureVerifier.Verify(velerov1api.CSIFeatureFlag); err != nil {
-		logger.WithError(err).Warn("CSI feature verification failed, the feature may not be ready.")
-	}
-
 	// cancelFunc is not deferred here because if it was, then ctx would immediately
 	// be canceled once this function exited, making it useless to any informers using later.
 	// That, in turn, causes the velero server to halt when the first informer tries to use it.
@@ -344,6 +352,14 @@ func newServer(f client.Factory, config serverConfig, logger *logrus.Logger) (*s
 		return nil, err
 	}
 	if err := snapshotv1api.AddToScheme(scheme); err != nil {
+		cancelFunc()
+		return nil, err
+	}
+	if err := batchv1api.AddToScheme(scheme); err != nil {
+		cancelFunc()
+		return nil, err
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
 		cancelFunc()
 		return nil, err
 	}
@@ -403,7 +419,6 @@ func newServer(f client.Factory, config serverConfig, logger *logrus.Logger) (*s
 		mgr:                   mgr,
 		credentialFileStore:   credentialFileStore,
 		credentialSecretStore: credentialSecretStore,
-		featureVerifier:       featureVerifier,
 	}
 
 	return s, nil
@@ -647,7 +662,7 @@ func (s *server) initRepoManager() error {
 	s.repoLocker = repository.NewRepoLocker()
 	s.repoEnsurer = repository.NewEnsurer(s.mgr.GetClient(), s.logger, s.config.resourceTimeout)
 
-	s.repoManager = repository.NewManager(s.namespace, s.mgr.GetClient(), s.repoLocker, s.repoEnsurer, s.credentialFileStore, s.credentialSecretStore, s.logger)
+	s.repoManager = repository.NewManager(s.namespace, s.mgr.GetClient(), s.repoLocker, s.repoEnsurer, s.credentialFileStore, s.credentialSecretStore, s.config.maintenanceCfg, s.logger)
 
 	return nil
 }
@@ -699,6 +714,7 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 		controller.RestoreOperations:   {},
 		controller.Schedule:            {},
 		controller.ServerStatusRequest: {},
+		controller.RestoreFinalizer:    {},
 	}
 
 	if s.config.restoreOnly {
@@ -742,7 +758,7 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 
 	if _, ok := enabledRuntimeControllers[controller.Backup]; ok {
 		backupper, err := backup.NewKubernetesBackupper(
-			s.mgr.GetClient(),
+			s.crClient,
 			s.discoveryHelper,
 			client.NewDynamicFactory(s.dynamicClient),
 			podexec.NewPodCommandExecutor(s.kubeClientConfig, s.kubeClient.CoreV1().RESTClient()),
@@ -757,6 +773,8 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 			s.config.defaultVolumesToFsBackup,
 			s.config.clientPageSize,
 			s.config.uploaderType,
+			newPluginManager,
+			backupStoreGetter,
 		)
 		cmd.CheckError(err)
 		if err := controller.NewBackupReconciler(
@@ -798,6 +816,7 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 			newPluginManager,
 			backupStoreGetter,
 			s.credentialFileStore,
+			s.repoEnsurer,
 		).SetupWithManager(s.mgr); err != nil {
 			s.logger.Fatal(err, "unable to create controller", "controller", controller.BackupDeletion)
 		}
@@ -836,6 +855,8 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 			s.config.defaultVolumesToFsBackup,
 			s.config.clientPageSize,
 			s.config.uploaderType,
+			newPluginManager,
+			backupStoreGetter,
 		)
 		cmd.CheckError(err)
 		r := controller.NewBackupFinalizerReconciler(
@@ -923,6 +944,8 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 		s.logger.Fatal(err, "fail to get controller-runtime informer from manager for PVR")
 	}
 
+	multiHookTracker := hook.NewMultiHookTracker()
+
 	if _, ok := enabledRuntimeControllers[controller.Restore]; ok {
 		restorer, err := restore.NewKubernetesRestorer(
 			s.discoveryHelper,
@@ -945,7 +968,7 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 			s.kubeClient.CoreV1().RESTClient(),
 			s.credentialFileStore,
 			s.mgr.GetClient(),
-			s.featureVerifier,
+			multiHookTracker,
 		)
 
 		cmd.CheckError(err)
@@ -963,6 +986,7 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 			s.config.formatFlag.Parse(),
 			s.config.defaultItemOperationTimeout,
 			s.config.disableInformerCache,
+			s.crClient,
 		)
 
 		if err = r.SetupWithManager(s.mgr); err != nil {
@@ -985,6 +1009,21 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 			s.logger,
 		).SetupWithManager(s.mgr); err != nil {
 			s.logger.Fatal(err, "unable to create controller", "controller", controller.ServerStatusRequest)
+		}
+	}
+
+	if _, ok := enabledRuntimeControllers[controller.RestoreFinalizer]; ok {
+		if err := controller.NewRestoreFinalizerReconciler(
+			s.logger,
+			s.namespace,
+			s.mgr.GetClient(),
+			newPluginManager,
+			backupStoreGetter,
+			s.metrics,
+			s.crClient,
+			multiHookTracker,
+		).SetupWithManager(s.mgr); err != nil {
+			s.logger.Fatal(err, "unable to create controller", "controller", controller.RestoreFinalizer)
 		}
 	}
 

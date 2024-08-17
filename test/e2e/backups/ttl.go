@@ -51,7 +51,6 @@ func (b *TTL) Init() {
 	b.backupName = "backup-ttl-test-" + UUIDgen.String()
 	b.restoreName = "restore-ttl-test-" + UUIDgen.String()
 	b.ttl = 10 * time.Minute
-
 }
 
 func TTLTest() {
@@ -77,7 +76,7 @@ func TTLTest() {
 		veleroCfg.GCFrequency = ""
 		if !veleroCfg.Debug {
 			By("Clean backups after test", func() {
-				DeleteAllBackups(context.Background(), *veleroCfg.ClientToInstallVelero)
+				DeleteAllBackups(context.Background(), &veleroCfg)
 			})
 			ctx, ctxCancel := context.WithTimeout(context.Background(), time.Minute*5)
 			defer ctxCancel()
@@ -120,7 +119,7 @@ func TTLTest() {
 
 		var snapshotCheckPoint SnapshotCheckPoint
 		if useVolumeSnapshots {
-			if veleroCfg.CloudProvider == "vsphere" {
+			if veleroCfg.CloudProvider == Vsphere {
 				// TODO - remove after upload progress monitoring is implemented
 				By("Waiting for vSphere uploads to complete", func() {
 					Expect(WaitForVSphereUploadCompletion(ctx, time.Hour,
@@ -140,7 +139,7 @@ func TTLTest() {
 				fmt.Sprintf("Failed to delete namespace %s", BackupCfg.BackupName))
 		})
 
-		if veleroCfg.CloudProvider == "aws" && useVolumeSnapshots {
+		if veleroCfg.CloudProvider == AWS && useVolumeSnapshots {
 			fmt.Println("Waiting 7 minutes to make sure the snapshots are ready...")
 			time.Sleep(7 * time.Minute)
 		}
@@ -155,11 +154,10 @@ func TTLTest() {
 		})
 
 		By("Associated Restores should be created", func() {
-			Expect(ObjectsShouldBeInBucket(veleroCfg.CloudProvider,
+			Expect(ObjectsShouldBeInBucket(veleroCfg.ObjectStoreProvider,
 				veleroCfg.CloudCredentialsFile, veleroCfg.BSLBucket,
 				veleroCfg.BSLPrefix, veleroCfg.BSLConfig, test.restoreName,
 				RestoreObjectsPrefix)).NotTo(HaveOccurred(), "Fail to get restore object")
-
 		})
 
 		By("Check TTL was set correctly", func() {
@@ -175,11 +173,11 @@ func TTLTest() {
 		})
 
 		By("Check if backups are deleted by GC", func() {
-			Expect(WaitBackupDeleted(ctx, veleroCfg.VeleroCLI, test.backupName, time.Minute*10)).To(Succeed(), fmt.Sprintf("Backup %s was not deleted by GC", test.backupName))
+			Expect(WaitBackupDeleted(ctx, test.backupName, time.Minute*10, &veleroCfg)).To(Succeed(), fmt.Sprintf("Backup %s was not deleted by GC", test.backupName))
 		})
 
 		By("Backup file from cloud object storage should be deleted", func() {
-			Expect(ObjectsShouldNotBeInBucket(veleroCfg.CloudProvider,
+			Expect(ObjectsShouldNotBeInBucket(veleroCfg.ObjectStoreProvider,
 				veleroCfg.CloudCredentialsFile, veleroCfg.BSLBucket,
 				veleroCfg.BSLPrefix, veleroCfg.BSLConfig, test.backupName,
 				BackupObjectsPrefix, 5)).NotTo(HaveOccurred(), "Fail to get Azure CSI snapshot checkpoint")
@@ -194,11 +192,10 @@ func TTLTest() {
 		})
 
 		By("Associated Restores should be deleted", func() {
-			Expect(ObjectsShouldNotBeInBucket(veleroCfg.CloudProvider,
+			Expect(ObjectsShouldNotBeInBucket(veleroCfg.ObjectStoreProvider,
 				veleroCfg.CloudCredentialsFile, veleroCfg.BSLBucket,
 				veleroCfg.BSLPrefix, veleroCfg.BSLConfig, test.restoreName,
 				RestoreObjectsPrefix, 5)).NotTo(HaveOccurred(), "Fail to get restore object")
-
 		})
 	})
 }

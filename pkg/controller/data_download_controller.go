@@ -214,7 +214,10 @@ func (r *DataDownloadReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	} else if dd.Status.Phase == velerov2alpha1api.DataDownloadPhaseAccepted {
 		if dd.Spec.Cancel {
 			log.Debugf("Data download is been canceled %s in Phase %s", dd.GetName(), dd.Status.Phase)
-			r.TryCancelDataDownload(ctx, dd)
+			r.TryCancelDataDownload(ctx, dd, "")
+		} else if peekErr := r.restoreExposer.PeekExposed(ctx, getDataDownloadOwnerObject(dd)); peekErr != nil {
+			r.TryCancelDataDownload(ctx, dd, fmt.Sprintf("found a dataupload %s/%s with expose error: %s. mark it as cancel", dd.Namespace, dd.Name, peekErr))
+			log.Errorf("Cancel dd %s/%s because of expose error %s", dd.Namespace, dd.Name, peekErr)
 		} else if dd.Status.StartTimestamp != nil {
 			if time.Since(dd.Status.StartTimestamp.Time) >= r.preparingTimeout {
 				r.onPrepareTimeout(ctx, dd)
@@ -268,6 +271,7 @@ func (r *DataDownloadReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		// Update status to InProgress
 		original := dd.DeepCopy()
 		dd.Status.Phase = velerov2alpha1api.DataDownloadPhaseInProgress
+		dd.Status.StartTimestamp = &metav1.Time{Time: r.Clock.Now()}
 		if err := r.client.Patch(ctx, dd, client.MergeFrom(original)); err != nil {
 			log.WithError(err).Error("Unable to update status to in progress")
 			return ctrl.Result{}, err
@@ -287,7 +291,11 @@ func (r *DataDownloadReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			log.Info("Data download is being canceled")
 			fsRestore := r.dataPathMgr.GetAsyncBR(dd.Name)
 			if fsRestore == nil {
-				r.OnDataDownloadCancelled(ctx, dd.GetNamespace(), dd.GetName())
+				if r.nodeName == dd.Status.Node {
+					r.OnDataDownloadCancelled(ctx, dd.GetNamespace(), dd.GetName())
+				} else {
+					log.Info("Data path is not started in this node and will not canceled by current node")
+				}
 				return ctrl.Result{}, nil
 			}
 
@@ -418,7 +426,7 @@ func (r *DataDownloadReconciler) OnDataDownloadCancelled(ctx context.Context, na
 	}
 }
 
-func (r *DataDownloadReconciler) TryCancelDataDownload(ctx context.Context, dd *velerov2alpha1api.DataDownload) {
+func (r *DataDownloadReconciler) TryCancelDataDownload(ctx context.Context, dd *velerov2alpha1api.DataDownload, message string) {
 	log := r.logger.WithField("datadownload", dd.Name)
 	log.Warn("Async fs backup data path canceled")
 
@@ -428,6 +436,7 @@ func (r *DataDownloadReconciler) TryCancelDataDownload(ctx context.Context, dd *
 			dataDownload.Status.StartTimestamp = &metav1.Time{Time: r.Clock.Now()}
 		}
 		dataDownload.Status.CompletionTimestamp = &metav1.Time{Time: r.Clock.Now()}
+		dataDownload.Status.Message = message
 	})
 
 	if err != nil {
@@ -664,7 +673,6 @@ func (r *DataDownloadReconciler) acceptDataDownload(ctx context.Context, dd *vel
 
 	updateFunc := func(datadownload *velerov2alpha1api.DataDownload) {
 		datadownload.Status.Phase = velerov2alpha1api.DataDownloadPhaseAccepted
-		datadownload.Status.StartTimestamp = &metav1.Time{Time: r.Clock.Now()}
 		labels := datadownload.GetLabels()
 		if labels == nil {
 			labels = make(map[string]string)

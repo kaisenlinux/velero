@@ -74,7 +74,17 @@ else
 	GCR_IMAGE_TAGS ?= $(GCR_IMAGE):$(VERSION)
 endif
 
+# check buildx is enabled
+# macOS/Windows docker cli without Docker Desktop license: https://github.com/abiosoft/colima
+# To add buildx to docker cli: https://github.com/abiosoft/colima/discussions/273#discussioncomment-2684502
 ifeq ($(shell docker buildx inspect 2>/dev/null | awk '/Status/ { print $$2 }'), running)
+	BUILDX_ENABLED ?= true
+# if emulated docker cli from podman, assume enabled
+# emulated docker cli from podman: https://podman-desktop.io/docs/migrating-from-docker/emulating-docker-cli-with-podman
+# podman known issues:
+# - on remote podman, such as on macOS,
+#   --output issue: https://github.com/containers/podman/issues/15922
+else ifeq ($(shell cat $(shell which docker) | grep -c "exec podman"), 1)
 	BUILDX_ENABLED ?= true
 else
 	BUILDX_ENABLED ?= false
@@ -108,6 +118,7 @@ platform_temp = $(subst -, ,$(ARCH))
 GOOS = $(word 1, $(platform_temp))
 GOARCH = $(word 2, $(platform_temp))
 GOPROXY ?= https://proxy.golang.org
+GOBIN=$$(pwd)/.go/bin
 
 # If you want to build all binaries, see the 'all-build' rule.
 # If you want to build all containers, see the 'all-containers' rule.
@@ -129,6 +140,7 @@ local: build-dirs
 # Add DEBUG=1 to enable debug locally
 	GOOS=$(GOOS) \
 	GOARCH=$(GOARCH) \
+	GOBIN=$(GOBIN) \
 	VERSION=$(VERSION) \
 	REGISTRY=$(REGISTRY) \
 	PKG=$(PKG) \
@@ -145,6 +157,7 @@ _output/bin/$(GOOS)/$(GOARCH)/$(BIN): build-dirs
 	$(MAKE) shell CMD="-c '\
 		GOOS=$(GOOS) \
 		GOARCH=$(GOARCH) \
+		GOBIN=$(GOBIN) \
 		VERSION=$(VERSION) \
 		REGISTRY=$(REGISTRY) \
 		PKG=$(PKG) \
@@ -357,11 +370,11 @@ gen-docs:
 
 .PHONY: test-e2e
 test-e2e: local
-	$(MAKE) -e VERSION=$(VERSION) -C test/e2e run
+	$(MAKE) -e VERSION=$(VERSION) -C test/ run-e2e
 
 .PHONY: test-perf
 test-perf: local
-	$(MAKE) -e VERSION=$(VERSION) -C test/perf run
+	$(MAKE) -e VERSION=$(VERSION) -C test/ run-perf
 
 go-generate:
 	go generate ./pkg/...

@@ -232,7 +232,6 @@ func TestResticRunRestore(t *testing.T) {
 			require.Equal(t, true, tc.errorHandleFunc(err))
 		})
 	}
-
 }
 
 func TestClose(t *testing.T) {
@@ -431,6 +430,13 @@ func TestParseUploaderConfig(t *testing.T) {
 			name: "SparseFilesDisabled",
 			uploaderConfig: map[string]string{
 				"writeSparseFiles": "false",
+			},
+			expectedFlags: []string{},
+		},
+		{
+			name: "RestoreConcorrency",
+			uploaderConfig: map[string]string{
+				"Parallel": "5",
 			},
 			expectedFlags: []string{},
 		},

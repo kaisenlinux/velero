@@ -42,14 +42,13 @@ import (
 	"k8s.io/client-go/dynamic"
 	kubetesting "k8s.io/client-go/testing"
 
-	internalVolume "github.com/vmware-tanzu/velero/internal/volume"
+	"github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/archive"
 	"github.com/vmware-tanzu/velero/pkg/builder"
 	"github.com/vmware-tanzu/velero/pkg/client"
 	"github.com/vmware-tanzu/velero/pkg/discovery"
 	"github.com/vmware-tanzu/velero/pkg/features"
-	verifiermocks "github.com/vmware-tanzu/velero/pkg/features/mocks"
 	"github.com/vmware-tanzu/velero/pkg/itemoperation"
 	"github.com/vmware-tanzu/velero/pkg/kuberesource"
 	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
@@ -60,7 +59,6 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/test"
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 	. "github.com/vmware-tanzu/velero/pkg/util/results"
-	"github.com/vmware-tanzu/velero/pkg/volume"
 )
 
 func TestRestorePVWithVolumeInfo(t *testing.T) {
@@ -71,7 +69,7 @@ func TestRestorePVWithVolumeInfo(t *testing.T) {
 		apiResources  []*test.APIResource
 		tarball       io.Reader
 		want          map[*test.APIResource][]string
-		volumeInfoMap map[string]internalVolume.VolumeInfo
+		volumeInfoMap map[string]volume.BackupVolumeInfo
 	}{
 		{
 			name:    "Restore PV with native snapshot",
@@ -84,11 +82,11 @@ func TestRestorePVWithVolumeInfo(t *testing.T) {
 			apiResources: []*test.APIResource{
 				test.PVs(),
 			},
-			volumeInfoMap: map[string]internalVolume.VolumeInfo{
+			volumeInfoMap: map[string]volume.BackupVolumeInfo{
 				"pv-1": {
-					BackupMethod: internalVolume.NativeSnapshot,
+					BackupMethod: volume.NativeSnapshot,
 					PVName:       "pv-1",
-					NativeSnapshotInfo: &internalVolume.NativeSnapshotInfo{
+					NativeSnapshotInfo: &volume.NativeSnapshotInfo{
 						SnapshotHandle: "testSnapshotHandle",
 					},
 				},
@@ -108,11 +106,11 @@ func TestRestorePVWithVolumeInfo(t *testing.T) {
 			apiResources: []*test.APIResource{
 				test.PVs(),
 			},
-			volumeInfoMap: map[string]internalVolume.VolumeInfo{
+			volumeInfoMap: map[string]volume.BackupVolumeInfo{
 				"pv-1": {
-					BackupMethod: internalVolume.PodVolumeBackup,
+					BackupMethod: volume.PodVolumeBackup,
 					PVName:       "pv-1",
-					PVBInfo: &internalVolume.PodVolumeBackupInfo{
+					PVBInfo: &volume.PodVolumeInfo{
 						SnapshotHandle: "testSnapshotHandle",
 						Size:           100,
 						NodeName:       "testNode",
@@ -134,12 +132,12 @@ func TestRestorePVWithVolumeInfo(t *testing.T) {
 			apiResources: []*test.APIResource{
 				test.PVs(),
 			},
-			volumeInfoMap: map[string]internalVolume.VolumeInfo{
+			volumeInfoMap: map[string]volume.BackupVolumeInfo{
 				"pv-1": {
-					BackupMethod:      internalVolume.CSISnapshot,
+					BackupMethod:      volume.CSISnapshot,
 					SnapshotDataMoved: false,
 					PVName:            "pv-1",
-					CSISnapshotInfo: &internalVolume.CSISnapshotInfo{
+					CSISnapshotInfo: &volume.CSISnapshotInfo{
 						Driver: "pd.csi.storage.gke.io",
 					},
 				},
@@ -159,15 +157,15 @@ func TestRestorePVWithVolumeInfo(t *testing.T) {
 			apiResources: []*test.APIResource{
 				test.PVs(),
 			},
-			volumeInfoMap: map[string]internalVolume.VolumeInfo{
+			volumeInfoMap: map[string]volume.BackupVolumeInfo{
 				"pv-1": {
-					BackupMethod:      internalVolume.CSISnapshot,
+					BackupMethod:      volume.CSISnapshot,
 					SnapshotDataMoved: true,
 					PVName:            "pv-1",
-					CSISnapshotInfo: &internalVolume.CSISnapshotInfo{
+					CSISnapshotInfo: &volume.CSISnapshotInfo{
 						Driver: "pd.csi.storage.gke.io",
 					},
-					SnapshotDataMovementInfo: &internalVolume.SnapshotDataMovementInfo{
+					SnapshotDataMovementInfo: &volume.SnapshotDataMovementInfo{
 						DataMover: "velero",
 					},
 				},
@@ -187,7 +185,7 @@ func TestRestorePVWithVolumeInfo(t *testing.T) {
 			apiResources: []*test.APIResource{
 				test.PVs(),
 			},
-			volumeInfoMap: map[string]internalVolume.VolumeInfo{
+			volumeInfoMap: map[string]volume.BackupVolumeInfo{
 				"pv-1": {
 					PVName:  "pv-1",
 					Skipped: true,
@@ -208,7 +206,7 @@ func TestRestorePVWithVolumeInfo(t *testing.T) {
 			apiResources: []*test.APIResource{
 				test.PVs(),
 			},
-			volumeInfoMap: map[string]internalVolume.VolumeInfo{
+			volumeInfoMap: map[string]volume.BackupVolumeInfo{
 				"pv-1": {
 					PVName:  "pv-1",
 					Skipped: true,
@@ -221,9 +219,6 @@ func TestRestorePVWithVolumeInfo(t *testing.T) {
 	}
 
 	features.Enable("EnableCSI")
-	finder := new(verifiermocks.PluginFinder)
-	finder.On("Find", mock.Anything, mock.Anything).Return(true)
-	verifier := features.NewVerifier(finder)
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -233,16 +228,15 @@ func TestRestorePVWithVolumeInfo(t *testing.T) {
 				h.DiscoveryClient.WithAPIResource(r)
 			}
 			require.NoError(t, h.restorer.discoveryHelper.Refresh())
-			h.restorer.featureVerifier = verifier
 
 			data := &Request{
-				Log:              h.log,
-				Restore:          tc.restore,
-				Backup:           tc.backup,
-				PodVolumeBackups: nil,
-				VolumeSnapshots:  nil,
-				BackupReader:     tc.tarball,
-				VolumeInfoMap:    tc.volumeInfoMap,
+				Log:                 h.log,
+				Restore:             tc.restore,
+				Backup:              tc.backup,
+				PodVolumeBackups:    nil,
+				VolumeSnapshots:     nil,
+				BackupReader:        tc.tarball,
+				BackupVolumeInfoMap: tc.volumeInfoMap,
 			}
 			warnings, errs := h.restorer.Restore(
 				data,
@@ -1492,7 +1486,7 @@ func (a *recordResourcesAction) WithAdditionalItems(items []velero.ResourceIdent
 	return a
 }
 
-// TestRestoreActionsRunsForCorrectItems runs restores with restore item actions, and
+// TestRestoreActionsRunForCorrectItems runs restores with restore item actions, and
 // verifies that each restore item action is run for the correct set of resources based on its
 // AppliesTo() resource selector. Verification is done by using the recordResourcesAction struct,
 // which records which resources it's executed for.
@@ -1860,7 +1854,6 @@ func TestRestoreWithAsyncOperations(t *testing.T) {
 				UpdatedItem: obj,
 				OperationID: obj.GetName() + "-1",
 			}, nil
-
 		},
 		progressFunc: func(operationID string, restore *velerov1api.Restore) (velero.OperationProgress, error) {
 			return velero.OperationProgress{
@@ -1882,7 +1875,6 @@ func TestRestoreWithAsyncOperations(t *testing.T) {
 				UpdatedItem: obj,
 				OperationID: obj.GetName() + "-1",
 			}, nil
-
 		},
 		progressFunc: func(operationID string, restore *velerov1api.Restore) (velero.OperationProgress, error) {
 			return velero.OperationProgress{
@@ -1903,7 +1895,6 @@ func TestRestoreWithAsyncOperations(t *testing.T) {
 			return &velero.RestoreItemActionExecuteOutput{
 				UpdatedItem: obj,
 			}, nil
-
 		},
 	}
 
@@ -3165,47 +3156,6 @@ func TestRestorePersistentVolumes(t *testing.T) {
 			want: []*test.APIResource{},
 		},
 		{
-			name:    "when a PV has a CSI VolumeSnapshot, but CSI modules are not ready, the PV is not restored",
-			restore: defaultRestore().Result(),
-			backup:  defaultBackup().Result(),
-			tarball: test.NewTarWriter(t).
-				AddItems("persistentvolumes",
-					builder.ForPersistentVolume("pv-1").
-						ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).
-						ClaimRef("velero", testPVCName).
-						Result(),
-				).
-				Done(),
-			apiResources: []*test.APIResource{
-				test.PVs(),
-				test.PVCs(),
-			},
-			csiVolumeSnapshots: []*snapshotv1api.VolumeSnapshot{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: "velero",
-						Name:      "test",
-					},
-					Spec: snapshotv1api.VolumeSnapshotSpec{
-						Source: snapshotv1api.VolumeSnapshotSource{
-							PersistentVolumeClaimName: &testPVCName,
-						},
-					},
-				},
-			},
-			volumeSnapshotLocations: []*velerov1api.VolumeSnapshotLocation{
-				builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "default").Provider("provider-1").Result(),
-			},
-			volumeSnapshotterGetter: map[string]vsv1.VolumeSnapshotter{
-				"provider-1": &volumeSnapshotter{
-					snapshotVolumes: map[string]string{"snapshot-1": "new-volume"},
-				},
-			},
-			want:                  []*test.APIResource{},
-			csiFeatureVerifierErr: "fake-feature-check-error",
-			wantError:             true,
-		},
-		{
 			name:    "when a PV with a reclaim policy of retain has a DataUpload result CM and does not exist in-cluster, the PV is not restored",
 			restore: defaultRestore().ObjectMeta(builder.WithUID("fakeUID")).Result(),
 			backup:  defaultBackup().Result(),
@@ -3237,40 +3187,6 @@ func TestRestorePersistentVolumes(t *testing.T) {
 			})).Result(),
 			want: []*test.APIResource{},
 		},
-		{
-			name:    "when a PV has a DataUpload result CM, but CSI modules are not ready, the PV is not restored",
-			restore: defaultRestore().ObjectMeta(builder.WithUID("fakeUID")).Result(),
-			backup:  defaultBackup().Result(),
-			tarball: test.NewTarWriter(t).
-				AddItems("persistentvolumes",
-					builder.ForPersistentVolume("pv-1").
-						ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).
-						ClaimRef("velero", testPVCName).
-						Result(),
-				).
-				Done(),
-			apiResources: []*test.APIResource{
-				test.PVs(),
-				test.PVCs(),
-				test.ConfigMaps(),
-			},
-			volumeSnapshotLocations: []*velerov1api.VolumeSnapshotLocation{
-				builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "default").Provider("provider-1").Result(),
-			},
-			volumeSnapshotterGetter: map[string]vsv1.VolumeSnapshotter{
-				"provider-1": &volumeSnapshotter{
-					snapshotVolumes: map[string]string{"snapshot-1": "new-volume"},
-				},
-			},
-			dataUploadResult: builder.ForConfigMap("velero", "test").ObjectMeta(builder.WithLabelsMap(map[string]string{
-				velerov1api.RestoreUIDLabel:       "fakeUID",
-				velerov1api.PVCNamespaceNameLabel: "velero.testPVC",
-				velerov1api.ResourceUsageLabel:    string(velerov1api.VeleroResourceUsageDataUploadResult),
-			})).Result(),
-			want:                  []*test.APIResource{},
-			csiFeatureVerifierErr: "fake-feature-check-error",
-			wantError:             true,
-		},
 	}
 
 	for _, tc := range tests {
@@ -3281,14 +3197,6 @@ func TestRestorePersistentVolumes(t *testing.T) {
 				renamed := "renamed-" + oldName
 				return renamed, nil
 			}
-
-			verifierMock := new(verifiermocks.Verifier)
-			if tc.csiFeatureVerifierErr != "" {
-				verifierMock.On("Verify", mock.Anything, mock.Anything).Return(false, errors.New(tc.csiFeatureVerifierErr))
-			} else {
-				verifierMock.On("Verify", mock.Anything, mock.Anything).Return(true, nil)
-			}
-			h.restorer.featureVerifier = verifierMock
 
 			// set up the VolumeSnapshotLocation client and add test data to it
 			for _, vsl := range tc.volumeSnapshotLocations {
@@ -3315,12 +3223,13 @@ func TestRestorePersistentVolumes(t *testing.T) {
 			}
 
 			data := &Request{
-				Log:                h.log,
-				Restore:            tc.restore,
-				Backup:             tc.backup,
-				VolumeSnapshots:    tc.volumeSnapshots,
-				BackupReader:       tc.tarball,
-				CSIVolumeSnapshots: tc.csiVolumeSnapshots,
+				Log:                      h.log,
+				Restore:                  tc.restore,
+				Backup:                   tc.backup,
+				VolumeSnapshots:          tc.volumeSnapshots,
+				BackupReader:             tc.tarball,
+				CSIVolumeSnapshots:       tc.csiVolumeSnapshots,
+				RestoreVolumeInfoTracker: volume.NewRestoreVolInfoTracker(tc.restore, h.log, test.NewFakeControllerRuntimeClient(t)),
 			}
 			warnings, errs := h.restorer.Restore(
 				data,
@@ -3445,7 +3354,7 @@ func TestRestoreWithPodVolume(t *testing.T) {
 					BackupLocation:   "",
 				}
 				restorer.
-					On("RestorePodVolumes", expectedArgs).
+					On("RestorePodVolumes", expectedArgs, mock.Anything).
 					Return(nil)
 			}
 
@@ -4042,6 +3951,21 @@ func TestHasCSIVolumeSnapshot(t *testing.T) {
 					},
 				},
 			},
+			expectedResult: false,
+		},
+		{
+			name: "VS's source PVC is nil, expect false",
+			obj: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"kind":       "PersistentVolume",
+					"apiVersion": "v1",
+					"metadata": map[string]interface{}{
+						"namespace": "default",
+						"name":      "test",
+					},
+				},
+			},
+			vs:             builder.ForVolumeSnapshot("velero", "test").Result(),
 			expectedResult: false,
 		},
 		{

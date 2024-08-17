@@ -78,9 +78,14 @@ func (b *fakeBackupper) BackupWithResolvers(logger logrus.FieldLogger, backup *p
 	return args.Error(0)
 }
 
-func (b *fakeBackupper) FinalizeBackup(logger logrus.FieldLogger, backup *pkgbackup.Request, inBackupFile io.Reader, outBackupFile io.Writer,
+func (b *fakeBackupper) FinalizeBackup(
+	logger logrus.FieldLogger,
+	backup *pkgbackup.Request,
+	inBackupFile io.Reader,
+	outBackupFile io.Writer,
 	backupItemActionResolver framework.BackupItemActionResolverV2,
-	asyncBIAOperations []*itemoperation.BackupOperation) error {
+	asyncBIAOperations []*itemoperation.BackupOperation,
+) error {
 	args := b.Called(logger, backup, inBackupFile, outBackupFile, backupItemActionResolver, asyncBIAOperations)
 	return args.Error(0)
 }
@@ -185,9 +190,15 @@ func TestProcessBackupValidationFailures(t *testing.T) {
 		},
 		{
 			name:           "use old filter parameters and new filter parameters together",
-			backup:         defaultBackup().IncludeClusterResources(true).IncludedNamespaceScopedResources("Deployment").IncludedNamespaces("default").Result(),
+			backup:         defaultBackup().IncludeClusterResources(true).IncludedNamespaceScopedResources("Deployment").IncludedNamespaces("foo").Result(),
 			backupLocation: defaultBackupLocation,
 			expectedErrs:   []string{"include-resources, exclude-resources and include-cluster-resources are old filter parameters.\ninclude-cluster-scoped-resources, exclude-cluster-scoped-resources, include-namespace-scoped-resources and exclude-namespace-scoped-resources are new filter parameters.\nThey cannot be used together"},
+		},
+		{
+			name:           "nonexisting namespace",
+			backup:         defaultBackup().IncludedNamespaces("non-existing").Result(),
+			backupLocation: defaultBackupLocation,
+			expectedErrs:   []string{"Invalid included/excluded namespace lists: namespaces \"non-existing\" not found"},
 		},
 	}
 
@@ -203,10 +214,11 @@ func TestProcessBackupValidationFailures(t *testing.T) {
 			require.NoError(t, err)
 
 			var fakeClient kbclient.Client
+			namespace := builder.ForNamespace("foo").Result()
 			if test.backupLocation != nil {
-				fakeClient = velerotest.NewFakeControllerRuntimeClient(t, test.backupLocation)
+				fakeClient = velerotest.NewFakeControllerRuntimeClient(t, test.backupLocation, namespace)
 			} else {
-				fakeClient = velerotest.NewFakeControllerRuntimeClient(t)
+				fakeClient = velerotest.NewFakeControllerRuntimeClient(t, namespace)
 			}
 
 			c := &backupReconciler{
@@ -435,7 +447,6 @@ func TestDefaultBackupTTL(t *testing.T) {
 		)
 
 		t.Run(test.name, func(t *testing.T) {
-
 			apiServer := velerotest.NewAPIServer(t)
 			discoveryHelper, err := discovery.NewHelper(apiServer.DiscoveryClient, logger)
 			require.NoError(t, err)
@@ -1478,7 +1489,7 @@ func TestValidateAndGetSnapshotLocations(t *testing.T) {
 			expectedSuccess:                     true,
 		},
 		{
-			name:   "location name does not correspond to any existing location and snapshotvolume disabled; should return empty VSL and no error",
+			name:   "location name does not correspond to any existing location and snapshotvolume disabled; should return error",
 			backup: defaultBackup().Phase(velerov1api.BackupPhaseNew).VolumeSnapshotLocations("random-name").SnapshotVolumes(false).Result(),
 			locations: []*velerov1api.VolumeSnapshotLocation{
 				builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "aws-us-east-1").Provider("aws").Result(),
@@ -1486,36 +1497,36 @@ func TestValidateAndGetSnapshotLocations(t *testing.T) {
 				builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "some-name").Provider("fake-provider").Result(),
 			},
 			expectedVolumeSnapshotLocationNames: nil,
-			expectedSuccess:                     true,
+			expectedErrors:                      "a VolumeSnapshotLocation CRD for the location random-name with the name specified in the backup spec needs to be created before this snapshot can be executed. Error: volumesnapshotlocations.velero.io \"random-name\" not found", expectedSuccess: false,
 		},
 		{
-			name:   "duplicate locationName per provider and snapshotvolume disabled; should return empty VSL and no error",
+			name:   "duplicate locationName per provider and snapshotvolume disabled; should return only one BSL",
 			backup: defaultBackup().Phase(velerov1api.BackupPhaseNew).VolumeSnapshotLocations("aws-us-west-1", "aws-us-west-1").SnapshotVolumes(false).Result(),
 			locations: []*velerov1api.VolumeSnapshotLocation{
 				builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "aws-us-east-1").Provider("aws").Result(),
 				builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "aws-us-west-1").Provider("aws").Result(),
 			},
-			expectedVolumeSnapshotLocationNames: nil,
+			expectedVolumeSnapshotLocationNames: []string{"aws-us-west-1"},
 			expectedSuccess:                     true,
 		},
 		{
-			name:   "no location name for the provider exists, only one VSL created and snapshotvolume disabled; should return empty VSL and no error",
+			name:   "no location name for the provider exists, only one VSL created and snapshotvolume disabled; should return the VSL",
 			backup: defaultBackup().Phase(velerov1api.BackupPhaseNew).SnapshotVolumes(false).Result(),
 			locations: []*velerov1api.VolumeSnapshotLocation{
 				builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "aws-us-east-1").Provider("aws").Result(),
 			},
-			expectedVolumeSnapshotLocationNames: nil,
+			expectedVolumeSnapshotLocationNames: []string{"aws-us-east-1"},
 			expectedSuccess:                     true,
 		},
 		{
-			name:   "multiple location names for a provider, no default location and backup has no location defined, but snapshotvolume disabled, should return empty VSL and no error",
+			name:   "multiple location names for a provider, no default location and backup has no location defined, but snapshotvolume disabled, should return error",
 			backup: defaultBackup().Phase(velerov1api.BackupPhaseNew).SnapshotVolumes(false).Result(),
 			locations: []*velerov1api.VolumeSnapshotLocation{
 				builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "aws-us-west-1").Provider("aws").Result(),
 				builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "aws-us-east-1").Provider("aws").Result(),
 			},
 			expectedVolumeSnapshotLocationNames: nil,
-			expectedSuccess:                     true,
+			expectedErrors:                      "provider aws has more than one possible volume snapshot location, and none were specified explicitly or as a default",
 		},
 	}
 
@@ -1561,6 +1572,43 @@ func TestValidateAndGetSnapshotLocations(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateNamespaceIncludesExcludes(t *testing.T) {
+	namespace := builder.ForNamespace("default").Result()
+	reconciler := &backupReconciler{
+		kbClient: velerotest.NewFakeControllerRuntimeClient(t, namespace),
+	}
+
+	// empty string as includedNamespaces
+	includedNamespaces := []string{""}
+	excludedNamespaces := []string{"test"}
+	errs := reconciler.validateNamespaceIncludesExcludes(includedNamespaces, excludedNamespaces)
+	assert.Empty(t, errs)
+
+	// "*" as includedNamespaces
+	includedNamespaces = []string{"*"}
+	excludedNamespaces = []string{"test"}
+	errs = reconciler.validateNamespaceIncludesExcludes(includedNamespaces, excludedNamespaces)
+	assert.Empty(t, errs)
+
+	// invalid namespaces
+	includedNamespaces = []string{"1@#"}
+	excludedNamespaces = []string{"2@#"}
+	errs = reconciler.validateNamespaceIncludesExcludes(includedNamespaces, excludedNamespaces)
+	assert.Len(t, errs, 2)
+
+	// not exist namespaces
+	includedNamespaces = []string{"non-existing-namespace"}
+	excludedNamespaces = []string{}
+	errs = reconciler.validateNamespaceIncludesExcludes(includedNamespaces, excludedNamespaces)
+	assert.Len(t, errs, 1)
+
+	// valid namespaces
+	includedNamespaces = []string{"default"}
+	excludedNamespaces = []string{}
+	errs = reconciler.validateNamespaceIncludesExcludes(includedNamespaces, excludedNamespaces)
+	assert.Empty(t, errs)
 }
 
 // Test_getLastSuccessBySchedule verifies that the getLastSuccessBySchedule helper function correctly returns
@@ -1735,6 +1783,5 @@ func TestPatchResourceWorksWithStatus(t *testing.T) {
 				t.Error(cmp.Diff(fromCluster, tt.args.updated))
 			}
 		})
-
 	}
 }

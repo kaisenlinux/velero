@@ -55,6 +55,14 @@ var KibishiiPodNameList = []string{"kibishii-deployment-0", "kibishii-deployment
 var KibishiiPVCNameList = []string{"kibishii-data-kibishii-deployment-0", "kibishii-data-kibishii-deployment-1"}
 var KibishiiStorageClassName = "kibishii-storage-class"
 
+func GetKibishiiPVCNameList(workerCount int) []string {
+	var kibishiiPVCNameList []string
+	for i := 0; i < workerCount; i++ {
+		kibishiiPVCNameList = append(kibishiiPVCNameList, fmt.Sprintf("kibishii-data-kibishii-deployment-%d", i))
+	}
+	return kibishiiPVCNameList
+}
+
 // RunKibishiiTests runs kibishii tests on the provider.
 func RunKibishiiTests(veleroCfg VeleroConfig, backupName, restoreName, backupLocation, kibishiiNamespace string,
 	useVolumeSnapshots, defaultVolumesToFsBackup bool) error {
@@ -111,7 +119,7 @@ func RunKibishiiTests(veleroCfg VeleroConfig, backupName, restoreName, backupLoc
 
 	// Checkpoint for a successful backup
 	if useVolumeSnapshots {
-		if providerName == "vsphere" {
+		if providerName == Vsphere {
 			// Wait for uploads started by the Velero Plugin for vSphere to complete
 			// TODO - remove after upload progress monitoring is implemented
 			fmt.Println("Waiting for vSphere uploads to complete")
@@ -137,7 +145,7 @@ func RunKibishiiTests(veleroCfg VeleroConfig, backupName, restoreName, backupLoc
 		if len(pvbs) != pvCount {
 			return errors.New(fmt.Sprintf("PVB count %d should be %d in namespace %s", len(pvbs), pvCount, kibishiiNamespace))
 		}
-		if providerName == "vsphere" {
+		if providerName == Vsphere {
 			// Wait for uploads started by the Velero Plugin for vSphere to complete
 			// TODO - remove after upload progress monitoring is implemented
 
@@ -149,8 +157,8 @@ func RunKibishiiTests(veleroCfg VeleroConfig, backupName, restoreName, backupLoc
 			// 	return errors.Wrapf(err, "Error get vSphere snapshot uploads")
 			// }
 		} else {
-			// wait for a period to confirm no snapshots exist for the backup
-			time.Sleep(5 * time.Minute)
+			// wait for a period to confirm no snapshots content exist for the backup
+			time.Sleep(1 * time.Minute)
 			if strings.EqualFold(veleroFeatures, FeatureCSI) {
 				_, err = GetSnapshotCheckPoint(*veleroCfg.ClientToInstallVelero, veleroCfg, 0,
 					kibishiiNamespace, backupName, KibishiiPVCNameList)
@@ -176,9 +184,9 @@ func RunKibishiiTests(veleroCfg VeleroConfig, backupName, restoreName, backupLoc
 		// To ensure Kibishii verification result is accurate
 		ClearKibishiiData(oneHourTimeout, kibishiiNamespace, pod, "kibishii", "data")
 
-		fileContent := fileBaseContent + pod
+		CreateFileContent := fileBaseContent + pod
 		err := CreateFileToPod(oneHourTimeout, kibishiiNamespace, pod, "kibishii", "data",
-			fileName, fileContent)
+			fileName, CreateFileContent)
 		if err != nil {
 			return errors.Wrapf(err, "failed to create file %s", fileName)
 		}
@@ -211,10 +219,10 @@ func RunKibishiiTests(veleroCfg VeleroConfig, backupName, restoreName, backupLoc
 		}
 	}
 
-	// the snapshots of AWS may be still in pending status when do the restore, wait for a while
-	// to avoid this https://github.com/vmware-tanzu/velero/issues/1799
-	// TODO remove this after https://github.com/vmware-tanzu/velero/issues/3533 is fixed
 	if useVolumeSnapshots {
+		// the snapshots of AWS may be still in pending status when do the restore, wait for a while
+		// to avoid this https://github.com/vmware-tanzu/velero/issues/1799
+		// TODO remove this after https://github.com/vmware-tanzu/velero/issues/3533 is fixed
 		fmt.Println("Waiting 5 minutes to make sure the snapshots are ready...")
 		time.Sleep(5 * time.Minute)
 	}
@@ -224,7 +232,7 @@ func RunKibishiiTests(veleroCfg VeleroConfig, backupName, restoreName, backupLoc
 		RunDebug(context.Background(), veleroCLI, veleroNamespace, "", restoreName)
 		return errors.Wrapf(err, "Restore %s failed from backup %s", restoreName, backupName)
 	}
-	if !useVolumeSnapshots && providerName != "vsphere" {
+	if !useVolumeSnapshots && providerName != Vsphere {
 		pvrs, err := GetPVR(oneHourTimeout, veleroCfg.VeleroNamespace, kibishiiNamespace)
 		if err != nil {
 			return errors.Wrapf(err, "failed to get PVR for namespace %s", kibishiiNamespace)
@@ -244,13 +252,13 @@ func RunKibishiiTests(veleroCfg VeleroConfig, backupName, restoreName, backupLoc
 
 func installKibishii(ctx context.Context, namespace string, cloudPlatform, veleroFeatures,
 	kibishiiDirectory string, useVolumeSnapshots bool, workerReplicas int) error {
-	if strings.EqualFold(cloudPlatform, "azure") &&
+	if strings.EqualFold(cloudPlatform, Azure) &&
 		strings.EqualFold(veleroFeatures, FeatureCSI) {
-		cloudPlatform = "azure-csi"
+		cloudPlatform = AzureCSI
 	}
-	if strings.EqualFold(cloudPlatform, "aws") &&
+	if strings.EqualFold(cloudPlatform, AWS) &&
 		strings.EqualFold(veleroFeatures, FeatureCSI) {
-		cloudPlatform = "aws-csi"
+		cloudPlatform = AwsCSI
 	}
 	// We use kustomize to generate YAML for Kibishii from the checked-in yaml directories
 	kibishiiInstallCmd := exec.CommandContext(ctx, "kubectl", "apply", "-n", namespace, "-k",

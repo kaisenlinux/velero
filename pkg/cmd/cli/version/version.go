@@ -68,7 +68,6 @@ func NewCommand(f client.Factory) *cobra.Command {
 func printVersion(w io.Writer, clientOnly bool, kbClient kbclient.Client, serverStatusGetter serverstatus.Getter) {
 	fmt.Fprintln(w, "Client:")
 	fmt.Fprintf(w, "\tVersion: %s\n", buildinfo.Version)
-	fmt.Fprintf(w, "\tGit commit: %s\n", buildinfo.FormattedGitSHA())
 
 	if clientOnly {
 		return

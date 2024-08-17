@@ -72,6 +72,10 @@ type kopiaObjectWriter struct {
 	rawWriter object.Writer
 }
 
+type openOptions struct {
+	allowIndexWriteOnLoad bool
+}
+
 const (
 	defaultLogInterval             = time.Second * 10
 	defaultMaintainCheckPeriod     = time.Hour
@@ -115,7 +119,7 @@ func (ks *kopiaRepoService) Open(ctx context.Context, repoOption udmrepo.RepoOpt
 
 	repoCtx := kopia.SetupKopiaLog(ctx, ks.logger)
 
-	r, err := openKopiaRepo(repoCtx, repoConfig, repoOption.RepoPassword)
+	r, err := openKopiaRepo(repoCtx, repoConfig, repoOption.RepoPassword, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -158,10 +162,14 @@ func (ks *kopiaRepoService) Maintain(ctx context.Context, repoOption udmrepo.Rep
 
 	repoCtx := kopia.SetupKopiaLog(ctx, ks.logger)
 
-	r, err := openKopiaRepo(repoCtx, repoConfig, repoOption.RepoPassword)
+	ks.logger.Info("Start to open repo for maintenance, allow index write on load")
+
+	r, err := openKopiaRepo(repoCtx, repoConfig, repoOption.RepoPassword, nil)
 	if err != nil {
 		return err
 	}
+
+	ks.logger.Info("Succeeded to open repo for maintenance")
 
 	defer func() {
 		c := r.Close(repoCtx)
@@ -366,6 +374,39 @@ func (kr *kopiaRepository) Flush(ctx context.Context) error {
 	return nil
 }
 
+func (kr *kopiaRepository) GetAdvancedFeatures() udmrepo.AdvancedFeatureInfo {
+	return udmrepo.AdvancedFeatureInfo{
+		MultiPartBackup: true,
+	}
+}
+
+func (kr *kopiaRepository) ConcatenateObjects(ctx context.Context, objectIDs []udmrepo.ID) (udmrepo.ID, error) {
+	if kr.rawWriter == nil {
+		return "", errors.New("repo writer is closed or not open")
+	}
+
+	if len(objectIDs) == 0 {
+		return udmrepo.ID(""), errors.New("object list is empty")
+	}
+
+	rawIDs := []object.ID{}
+	for _, id := range objectIDs {
+		rawID, err := object.ParseID(string(id))
+		if err != nil {
+			return udmrepo.ID(""), errors.Wrapf(err, "error to parse object ID from %v", id)
+		}
+
+		rawIDs = append(rawIDs, rawID)
+	}
+
+	result, err := kr.rawWriter.ConcatenateObjects(ctx, rawIDs)
+	if err != nil {
+		return udmrepo.ID(""), errors.Wrap(err, "error to concatenate objects")
+	}
+
+	return udmrepo.ID(result.String()), nil
+}
+
 // updateProgress is called when the repository writes a piece of blob data to the storage during data write
 func (kr *kopiaRepository) updateProgress(uploaded int64) {
 	total := atomic.AddInt64(&kr.uploaded, uploaded)
@@ -513,8 +554,13 @@ func (lt *logThrottle) shouldLog() bool {
 	return false
 }
 
-func openKopiaRepo(ctx context.Context, configFile string, password string) (repo.Repository, error) {
-	r, err := kopiaRepoOpen(ctx, configFile, password, &repo.Options{})
+func openKopiaRepo(ctx context.Context, configFile string, password string, options *openOptions) (repo.Repository, error) {
+	allowIndexWriteOnLoad := false
+	if options != nil {
+		allowIndexWriteOnLoad = options.allowIndexWriteOnLoad
+	}
+
+	r, err := kopiaRepoOpen(ctx, configFile, password, &repo.Options{AllowWriteOnIndexLoad: allowIndexWriteOnLoad})
 	if os.IsNotExist(err) {
 		return nil, errors.Wrap(err, "error to open repo, repo doesn't exist")
 	}
@@ -527,7 +573,7 @@ func openKopiaRepo(ctx context.Context, configFile string, password string) (rep
 }
 
 func writeInitParameters(ctx context.Context, repoOption udmrepo.RepoOptions, logger logrus.FieldLogger) error {
-	r, err := openKopiaRepo(ctx, repoOption.ConfigFilePath, repoOption.RepoPassword)
+	r, err := openKopiaRepo(ctx, repoOption.ConfigFilePath, repoOption.RepoPassword, nil)
 	if err != nil {
 		return err
 	}

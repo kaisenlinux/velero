@@ -4,12 +4,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
-	. "github.com/vmware-tanzu/velero/test"
 	. "github.com/vmware-tanzu/velero/test/e2e/test"
 	. "github.com/vmware-tanzu/velero/test/util/k8s"
 	. "github.com/vmware-tanzu/velero/test/util/kibishii"
@@ -33,11 +31,12 @@ func (n *NamespaceMapping) Init() error {
 	n.CaseBaseName = "ns-mp-" + n.UUIDgen
 	n.BackupName = "backup-" + n.CaseBaseName
 	n.RestoreName = "restore-" + n.CaseBaseName
-	n.VeleroCfg = VeleroCfg
-	n.Client = *n.VeleroCfg.ClientToInstallVelero
 	n.VeleroCfg.UseVolumeSnapshots = n.UseVolumeSnapshots
 	n.VeleroCfg.UseNodeAgent = !n.UseVolumeSnapshots
 	n.kibishiiData = &KibishiiData{Levels: 2, DirsPerLevel: 10, FilesPerLevel: 10, FileLength: 1024, BlockSize: 1024, PassNum: 0, ExpectedNodes: 2}
+	if n.VeleroCfg.CloudProvider == "kind" {
+		n.kibishiiData = &KibishiiData{Levels: 0, DirsPerLevel: 0, FilesPerLevel: 0, FileLength: 0, BlockSize: 0, PassNum: 0, ExpectedNodes: 2}
+	}
 	backupType := "restic"
 	if n.UseVolumeSnapshots {
 		backupType = "snapshot"
@@ -67,7 +66,11 @@ func (n *NamespaceMapping) Init() error {
 		"create", "--namespace", n.VeleroCfg.VeleroNamespace, "backup", n.BackupName,
 		"--include-namespaces", strings.Join(*n.NSIncluded, ","), "--wait",
 	}
-	if n.UseVolumeSnapshots {
+	if n.VeleroCfg.CloudProvider == "kind" {
+		// don't test volume snapshotter or file system backup on kind
+		n.BackupArgs = append(n.BackupArgs, "--snapshot-volumes=false")
+		n.UseVolumeSnapshots = false
+	} else if n.UseVolumeSnapshots {
 		n.BackupArgs = append(n.BackupArgs, "--snapshot-volumes")
 	} else {
 		n.BackupArgs = append(n.BackupArgs, "--snapshot-volumes=false")
@@ -82,7 +85,6 @@ func (n *NamespaceMapping) Init() error {
 }
 
 func (n *NamespaceMapping) CreateResources() error {
-	n.Ctx, n.CtxCancel = context.WithTimeout(context.Background(), 60*time.Minute)
 	for index, ns := range *n.NSIncluded {
 		n.kibishiiData.Levels = len(*n.NSIncluded) + index
 		By(fmt.Sprintf("Creating namespaces ...%s\n", ns), func() {

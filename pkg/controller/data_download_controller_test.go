@@ -149,7 +149,7 @@ func initDataDownloadReconcilerWithError(objects []runtime.Object, needError ...
 
 	dataPathMgr := datapath.NewManager(1)
 
-	return NewDataDownloadReconciler(fakeClient, fakeKubeClient, dataPathMgr, nil, &credentials.CredentialGetter{FromFile: credentialFileStore}, "test_node", time.Minute*5, velerotest.NewLogger(), metrics.NewServerMetrics()), nil
+	return NewDataDownloadReconciler(fakeClient, fakeKubeClient, dataPathMgr, nil, &credentials.CredentialGetter{FromFile: credentialFileStore}, "test-node", time.Minute*5, velerotest.NewLogger(), metrics.NewServerMetrics()), nil
 }
 
 func TestDataDownloadReconcile(t *testing.T) {
@@ -174,6 +174,7 @@ func TestDataDownloadReconcile(t *testing.T) {
 		needCreateFSBR    bool
 		isExposeErr       bool
 		isGetExposeErr    bool
+		isPeekExposeErr   bool
 		isNilExposer      bool
 		isFSBRInitErr     bool
 		isFSBRRestoreErr  bool
@@ -206,11 +207,40 @@ func TestDataDownloadReconcile(t *testing.T) {
 			mockCancel: true,
 		},
 		{
-			name:           "Cancel data downloand in progress",
-			dd:             dataDownloadBuilder().Phase(velerov2alpha1api.DataDownloadPhaseInProgress).Cancel(true).Result(),
+			name: "Cancel data downloand in progress with create FSBR",
+			dd: func() *velerov2alpha1api.DataDownload {
+				dd := dataDownloadBuilder().Phase(velerov2alpha1api.DataDownloadPhaseInProgress).Cancel(true).Result()
+				dd.Status.Node = "test-node"
+				return dd
+			}(),
 			targetPVC:      builder.ForPersistentVolumeClaim("test-ns", "test-pvc").Result(),
 			needCreateFSBR: true,
 			mockCancel:     true,
+			expected:       dataDownloadBuilder().Phase(velerov2alpha1api.DataDownloadPhaseCanceling).Result(),
+		},
+		{
+			name: "Cancel data downloand in progress without create FSBR",
+			dd: func() *velerov2alpha1api.DataDownload {
+				dd := dataDownloadBuilder().Phase(velerov2alpha1api.DataDownloadPhaseInProgress).Cancel(true).Result()
+				dd.Status.Node = "test-node"
+				return dd
+			}(),
+			targetPVC:      builder.ForPersistentVolumeClaim("test-ns", "test-pvc").Result(),
+			needCreateFSBR: false,
+			mockCancel:     true,
+			expected:       dataDownloadBuilder().Phase(velerov2alpha1api.DataDownloadPhaseCanceled).Result(),
+		},
+		{
+			name: "Cancel data downloand in progress in different node",
+			dd: func() *velerov2alpha1api.DataDownload {
+				dd := dataDownloadBuilder().Phase(velerov2alpha1api.DataDownloadPhaseInProgress).Cancel(true).Result()
+				dd.Status.Node = "different-node"
+				return dd
+			}(),
+			targetPVC:      builder.ForPersistentVolumeClaim("test-ns", "test-pvc").Result(),
+			needCreateFSBR: false,
+			mockCancel:     true,
+			expected:       dataDownloadBuilder().Phase(velerov2alpha1api.DataDownloadPhaseInProgress).Result(),
 		},
 		{
 			name:           "Error in data path is concurrent limited",
@@ -303,6 +333,12 @@ func TestDataDownloadReconcile(t *testing.T) {
 			expected: dataDownloadBuilder().Phase(velerov2alpha1api.DataDownloadPhaseFailed).Result(),
 		},
 		{
+			name:            "peek error",
+			dd:              dataDownloadBuilder().Phase(velerov2alpha1api.DataDownloadPhaseAccepted).Result(),
+			isPeekExposeErr: true,
+			expected:        dataDownloadBuilder().Phase(velerov2alpha1api.DataDownloadPhaseCanceled).Result(),
+		},
+		{
 			name: "dataDownload with enabled cancel",
 			dd: func() *velerov2alpha1api.DataDownload {
 				dd := dataDownloadBuilder().Phase(velerov2alpha1api.DataDownloadPhaseAccepted).Result()
@@ -369,7 +405,7 @@ func TestDataDownloadReconcile(t *testing.T) {
 				return fsBR
 			}
 
-			if test.isExposeErr || test.isGetExposeErr || test.isNilExposer || test.notNilExpose {
+			if test.isExposeErr || test.isGetExposeErr || test.isPeekExposeErr || test.isNilExposer || test.notNilExpose {
 				if test.isNilExposer {
 					r.restoreExposer = nil
 				} else {
@@ -383,6 +419,8 @@ func TestDataDownloadReconcile(t *testing.T) {
 							ep.On("GetExposed", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(&exposer.ExposeResult{ByPod: exposer.ExposeByPod{HostingPod: hostingPod, VolumeName: "test-pvc"}}, nil)
 						} else if test.isGetExposeErr {
 							ep.On("GetExposed", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.New("Error to get restore exposer"))
+						} else if test.isPeekExposeErr {
+							ep.On("PeekExposed", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(errors.New("fake-peek-error"))
 						}
 
 						if !test.notMockCleanUp {
@@ -526,7 +564,6 @@ func TestOnDataDownloadCompleted(t *testing.T) {
 				ep := exposermockes.NewGenericRestoreExposer(t)
 				if test.rebindVolumeErr {
 					ep.On("RebindVolume", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(errors.New("Error to rebind volume"))
-
 				} else {
 					ep.On("RebindVolume", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 				}
@@ -802,7 +839,7 @@ func TestTryCancelDataDownload(t *testing.T) {
 		err = r.client.Create(ctx, test.dd)
 		require.NoError(t, err)
 
-		r.TryCancelDataDownload(ctx, test.dd)
+		r.TryCancelDataDownload(ctx, test.dd, "")
 
 		if test.expectedErr == "" {
 			assert.NoError(t, err)
@@ -813,7 +850,6 @@ func TestTryCancelDataDownload(t *testing.T) {
 }
 
 func TestUpdateDataDownloadWithRetry(t *testing.T) {
-
 	namespacedName := types.NamespacedName{
 		Name:      dataDownloadName,
 		Namespace: "velero",
@@ -1026,7 +1062,7 @@ func TestAttemptDataDownloadResume(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 
-				// Verify DataDownload marked as Cancelled
+				// Verify DataDownload marked as Canceled
 				for _, duName := range test.cancelledDataDownloads {
 					dataUpload := &velerov2alpha1api.DataDownload{}
 					err := r.client.Get(context.Background(), types.NamespacedName{Namespace: "velero", Name: duName}, dataUpload)

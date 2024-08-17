@@ -141,7 +141,11 @@ func (fs *fileSystemBR) StartBackup(source AccessPoint, realSource string, paren
 		if err == provider.ErrorCanceled {
 			fs.callbacks.OnCancelled(context.Background(), fs.namespace, fs.jobName)
 		} else if err != nil {
-			fs.callbacks.OnFailed(context.Background(), fs.namespace, fs.jobName, err)
+			dataPathErr := DataPathError{
+				snapshotID: snapshotID,
+				err:        err,
+			}
+			fs.callbacks.OnFailed(context.Background(), fs.namespace, fs.jobName, dataPathErr)
 		} else {
 			fs.callbacks.OnCompleted(context.Background(), fs.namespace, fs.jobName, Result{Backup: BackupResult{snapshotID, emptySnapshot, source}})
 		}
@@ -161,7 +165,11 @@ func (fs *fileSystemBR) StartRestore(snapshotID string, target AccessPoint, uplo
 		if err == provider.ErrorCanceled {
 			fs.callbacks.OnCancelled(context.Background(), fs.namespace, fs.jobName)
 		} else if err != nil {
-			fs.callbacks.OnFailed(context.Background(), fs.namespace, fs.jobName, err)
+			dataPathErr := DataPathError{
+				snapshotID: snapshotID,
+				err:        err,
+			}
+			fs.callbacks.OnFailed(context.Background(), fs.namespace, fs.jobName, dataPathErr)
 		} else {
 			fs.callbacks.OnCompleted(context.Background(), fs.namespace, fs.jobName, Result{Restore: RestoreResult{Target: target}})
 		}
@@ -184,7 +192,7 @@ func (fs *fileSystemBR) Cancel() {
 
 func (fs *fileSystemBR) boostRepoConnect(ctx context.Context, repositoryType string, credentialGetter *credentials.CredentialGetter) error {
 	if repositoryType == velerov1api.BackupRepositoryTypeKopia {
-		if err := repoProvider.NewUnifiedRepoProvider(*credentialGetter, repositoryType, fs.log).BoostRepoConnect(ctx, repoProvider.RepoParam{BackupLocation: fs.backupLocation, BackupRepo: fs.backupRepo}); err != nil {
+		if err := repoProvider.NewUnifiedRepoProvider(*credentialGetter, repositoryType, fs.client, fs.log).BoostRepoConnect(ctx, repoProvider.RepoParam{BackupLocation: fs.backupLocation, BackupRepo: fs.backupRepo}); err != nil {
 			return err
 		}
 	} else {

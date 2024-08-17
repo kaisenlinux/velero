@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -127,7 +128,6 @@ func newS3Client(cfg aws.Config, url string, forcePathStyle bool) (*s3.Client, e
 // GetBucketRegion returns the AWS region that a bucket is in, or an error
 // if the region cannot be determined.
 func GetBucketRegion(bucket string) (string, error) {
-
 	cfg, err := config.LoadDefaultConfig(context.Background())
 	if err != nil {
 		return "", errors.WithStack(err)
@@ -410,8 +410,61 @@ func (s AWSStorage) GetMinioBucketSize(cloudCredentialsFile, bslBucket, bslPrefi
 			return 0, errors.Wrapf(err, "failed to list objects in bucket %s", bslBucket)
 		}
 		for _, obj := range page.Contents {
-			totalSize += obj.Size
+			totalSize += *obj.Size
 		}
 	}
 	return totalSize, nil
+}
+
+func (s AWSStorage) GetObject(cloudCredentialsFile, bslBucket, bslPrefix, bslConfig, objectKey string) (io.ReadCloser, error) {
+	config := flag.NewMap()
+	config.Set(bslConfig)
+	objectsInput := s3.ListObjectsV2Input{}
+	objectsInput.Bucket = aws.String(bslBucket)
+	objectsInput.Delimiter = aws.String("/")
+
+	if bslPrefix != "" {
+		objectsInput.Prefix = aws.String(bslPrefix)
+	}
+
+	var err error
+	var s3Config aws.Config
+	var s3Client *s3.Client
+	region := config.Data()["region"]
+	s3url := ""
+	if region == "" {
+		region, err = GetBucketRegion(bslBucket)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to get region for bucket %s", bslBucket)
+		}
+	}
+	if region == "minio" {
+		s3url = config.Data()["s3Url"]
+		s3Config, err = newAWSConfig(region, "", cloudCredentialsFile, true, "")
+		if err != nil {
+			return nil, errors.Wrapf(err, "Failed to create AWS config of region %s", region)
+		}
+		s3Client, err = newS3Client(s3Config, s3url, true)
+	} else {
+		s3Config, err = newAWSConfig(region, "", cloudCredentialsFile, false, "")
+		if err != nil {
+			return nil, errors.Wrapf(err, "Failed to create AWS config of region %s", region)
+		}
+		s3Client, err = newS3Client(s3Config, s3url, true)
+	}
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to create S3 client of region %s", region)
+	}
+
+	fullObjectKey := strings.Trim(bslPrefix, "/") + "/" + strings.Trim(objectKey, "/")
+
+	result, err := s3Client.GetObject(context.TODO(), &s3.GetObjectInput{
+		Bucket: aws.String(bslBucket),
+		Key:    aws.String(fullObjectKey),
+	})
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to get object %s", fullObjectKey)
+	}
+
+	return result.Body, nil
 }

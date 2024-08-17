@@ -29,6 +29,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	corev1api "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	storagev1api "k8s.io/api/storage/v1"
 
 	clientTesting "k8s.io/client-go/testing"
@@ -1116,6 +1117,264 @@ func TestIsPVCBound(t *testing.T) {
 			result := IsPVCBound(test.pvc)
 
 			assert.Equal(t, test.expect, result)
+		})
+	}
+}
+
+var (
+	csiStorageClass = "csi-hostpath-sc"
+)
+
+func TestGetPVForPVC(t *testing.T) {
+	boundPVC := &v1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-csi-pvc",
+			Namespace: "default",
+		},
+		Spec: v1.PersistentVolumeClaimSpec{
+			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
+			Resources: v1.VolumeResourceRequirements{
+				Requests: v1.ResourceList{},
+			},
+			StorageClassName: &csiStorageClass,
+			VolumeName:       "test-csi-7d28e566-ade7-4ed6-9e15-2e44d2fbcc08",
+		},
+		Status: v1.PersistentVolumeClaimStatus{
+			Phase:       v1.ClaimBound,
+			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
+			Capacity:    v1.ResourceList{},
+		},
+	}
+	matchingPV := &v1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-csi-7d28e566-ade7-4ed6-9e15-2e44d2fbcc08",
+		},
+		Spec: v1.PersistentVolumeSpec{
+			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
+			Capacity:    v1.ResourceList{},
+			ClaimRef: &v1.ObjectReference{
+				Kind:            "PersistentVolumeClaim",
+				Name:            "test-csi-pvc",
+				Namespace:       "default",
+				ResourceVersion: "1027",
+				UID:             "7d28e566-ade7-4ed6-9e15-2e44d2fbcc08",
+			},
+			PersistentVolumeSource: v1.PersistentVolumeSource{
+				CSI: &v1.CSIPersistentVolumeSource{
+					Driver: "hostpath.csi.k8s.io",
+					FSType: "ext4",
+					VolumeAttributes: map[string]string{
+						"storage.kubernetes.io/csiProvisionerIdentity": "1582049697841-8081-hostpath.csi.k8s.io",
+					},
+					VolumeHandle: "e61f2b48-527a-11ea-b54f-cab6317018f1",
+				},
+			},
+			PersistentVolumeReclaimPolicy: v1.PersistentVolumeReclaimDelete,
+			StorageClassName:              csiStorageClass,
+		},
+		Status: v1.PersistentVolumeStatus{
+			Phase: v1.VolumeBound,
+		},
+	}
+
+	pvcWithNoVolumeName := &v1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "no-vol-pvc",
+			Namespace: "default",
+		},
+		Spec: v1.PersistentVolumeClaimSpec{
+			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
+			Resources: v1.VolumeResourceRequirements{
+				Requests: v1.ResourceList{},
+			},
+			StorageClassName: &csiStorageClass,
+		},
+		Status: v1.PersistentVolumeClaimStatus{},
+	}
+
+	unboundPVC := &v1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "unbound-pvc",
+			Namespace: "default",
+		},
+		Spec: v1.PersistentVolumeClaimSpec{
+			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
+			Resources: v1.VolumeResourceRequirements{
+				Requests: v1.ResourceList{},
+			},
+			StorageClassName: &csiStorageClass,
+			VolumeName:       "test-csi-7d28e566-ade7-4ed6-9e15-2e44d2fbcc08",
+		},
+		Status: v1.PersistentVolumeClaimStatus{
+			Phase:       v1.ClaimPending,
+			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
+			Capacity:    v1.ResourceList{},
+		},
+	}
+
+	testCases := []struct {
+		name        string
+		inPVC       *v1.PersistentVolumeClaim
+		expectError bool
+		expectedPV  *v1.PersistentVolume
+	}{
+		{
+			name:        "should find PV matching the PVC",
+			inPVC:       boundPVC,
+			expectError: false,
+			expectedPV:  matchingPV,
+		},
+		{
+			name:        "should fail to find PV for PVC with no volumeName",
+			inPVC:       pvcWithNoVolumeName,
+			expectError: true,
+			expectedPV:  nil,
+		},
+		{
+			name:        "should fail to find PV for PVC not in bound phase",
+			inPVC:       unboundPVC,
+			expectError: true,
+			expectedPV:  nil,
+		},
+	}
+
+	objs := []runtime.Object{boundPVC, matchingPV, pvcWithNoVolumeName, unboundPVC}
+	fakeClient := velerotest.NewFakeControllerRuntimeClient(t, objs...)
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			actualPV, actualError := GetPVForPVC(tc.inPVC, fakeClient)
+
+			if tc.expectError {
+				assert.NotNil(t, actualError, "Want error; Got nil error")
+				assert.Nilf(t, actualPV, "Want PV: nil; Got PV: %q", actualPV)
+				return
+			}
+
+			assert.Nilf(t, actualError, "Want: nil error; Got: %v", actualError)
+			assert.Equalf(t, actualPV.Name, tc.expectedPV.Name, "Want PV with name %q; Got PV with name %q", tc.expectedPV.Name, actualPV.Name)
+		})
+	}
+}
+
+func TestGetPVCForPodVolume(t *testing.T) {
+	sampleVol := &corev1api.Volume{
+		Name: "sample-volume",
+		VolumeSource: corev1api.VolumeSource{
+			PersistentVolumeClaim: &corev1api.PersistentVolumeClaimVolumeSource{
+				ClaimName: "sample-pvc",
+			},
+		},
+	}
+
+	sampleVol2 := &corev1api.Volume{
+		Name: "sample-volume",
+		VolumeSource: corev1api.VolumeSource{
+			PersistentVolumeClaim: &corev1api.PersistentVolumeClaimVolumeSource{
+				ClaimName: "sample-pvc-1",
+			},
+		},
+	}
+
+	sampleVol3 := &corev1api.Volume{
+		Name:         "sample-volume",
+		VolumeSource: corev1api.VolumeSource{},
+	}
+
+	samplePod := &corev1api.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sample-pod",
+			Namespace: "sample-ns",
+		},
+
+		Spec: corev1api.PodSpec{
+			Containers: []corev1api.Container{
+				{
+					Name:  "sample-container",
+					Image: "sample-image",
+					VolumeMounts: []corev1api.VolumeMount{
+						{
+							Name:      "sample-vm",
+							MountPath: "/etc/pod-info",
+						},
+					},
+				},
+			},
+			Volumes: []corev1api.Volume{
+				{
+					Name: "sample-volume",
+					VolumeSource: corev1api.VolumeSource{
+						PersistentVolumeClaim: &corev1api.PersistentVolumeClaimVolumeSource{
+							ClaimName: "sample-pvc",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	matchingPVC := &corev1api.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sample-pvc",
+			Namespace: "sample-ns",
+		},
+		Spec: v1.PersistentVolumeClaimSpec{
+			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
+			Resources: v1.VolumeResourceRequirements{
+				Requests: v1.ResourceList{},
+			},
+			StorageClassName: &csiStorageClass,
+			VolumeName:       "test-csi-7d28e566-ade7-4ed6-9e15-2e44d2fbcc08",
+		},
+		Status: v1.PersistentVolumeClaimStatus{
+			Phase:       v1.ClaimBound,
+			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
+			Capacity:    v1.ResourceList{},
+		},
+	}
+
+	testCases := []struct {
+		name          string
+		vol           *corev1api.Volume
+		pod           *corev1api.Pod
+		expectedPVC   *corev1api.PersistentVolumeClaim
+		expectedError bool
+	}{
+		{
+			name:          "should find PVC for volume",
+			vol:           sampleVol,
+			pod:           samplePod,
+			expectedPVC:   matchingPVC,
+			expectedError: false,
+		},
+		{
+			name:          "should not find PVC for volume not found error case",
+			vol:           sampleVol2,
+			pod:           samplePod,
+			expectedPVC:   nil,
+			expectedError: true,
+		},
+		{
+			name:          "should not find PVC vol has no PVC, error case",
+			vol:           sampleVol3,
+			pod:           samplePod,
+			expectedPVC:   nil,
+			expectedError: true,
+		},
+	}
+
+	objs := []runtime.Object{matchingPVC}
+	fakeClient := velerotest.NewFakeControllerRuntimeClient(t, objs...)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			actualPVC, actualError := GetPVCForPodVolume(tc.vol, samplePod, fakeClient)
+			if tc.expectedError {
+				assert.NotNil(t, actualError, "Want error; Got nil error")
+				assert.Nilf(t, actualPVC, "Want PV: nil; Got PV: %q", actualPVC)
+				return
+			}
+			assert.Nilf(t, actualError, "Want: nil error; Got: %v", actualError)
+			assert.Equalf(t, actualPVC.Name, tc.expectedPVC.Name, "Want PVC with name %q; Got PVC with name %q", tc.expectedPVC.Name, actualPVC)
 		})
 	}
 }

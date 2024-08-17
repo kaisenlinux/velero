@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -12,6 +11,7 @@ import (
 
 	. "github.com/vmware-tanzu/velero/test"
 	. "github.com/vmware-tanzu/velero/test/e2e/test"
+	. "github.com/vmware-tanzu/velero/test/util/common"
 	. "github.com/vmware-tanzu/velero/test/util/k8s"
 )
 
@@ -35,8 +35,6 @@ func (p *PVBackupFiltering) Init() error {
 	p.CaseBaseName = "pv-filter-" + p.UUIDgen
 	p.BackupName = "backup-" + p.CaseBaseName + p.id
 	p.RestoreName = "restore-" + p.CaseBaseName + p.id
-	p.VeleroCfg = VeleroCfg
-	p.Client = *p.VeleroCfg.ClientToInstallVelero
 	p.VeleroCfg.UseVolumeSnapshots = false
 	p.VeleroCfg.UseNodeAgent = true
 	p.NSIncluded = &[]string{fmt.Sprintf("%s-%s-%d", p.CaseBaseName, p.id, 1), fmt.Sprintf("%s-%s-%d", p.CaseBaseName, p.id, 2)}
@@ -48,7 +46,7 @@ func (p *PVBackupFiltering) Init() error {
 	}
 
 	p.BackupArgs = []string{
-		"create", "--namespace", VeleroCfg.VeleroNamespace, "backup", p.BackupName,
+		"create", "--namespace", p.VeleroCfg.VeleroNamespace, "backup", p.BackupName,
 		"--include-namespaces", strings.Join(*p.NSIncluded, ","),
 		"--snapshot-volumes=false", "--wait",
 	}
@@ -56,18 +54,16 @@ func (p *PVBackupFiltering) Init() error {
 	//   annotation will be ignored, so it's only set for opt-out test
 	if p.annotation == OPT_OUT_ANN {
 		p.BackupArgs = append(p.BackupArgs, "--default-volumes-to-fs-backup")
-
 	}
 	p.RestoreArgs = []string{
-		"create", "--namespace", VeleroCfg.VeleroNamespace, "restore", p.RestoreName,
+		"create", "--namespace", p.VeleroCfg.VeleroNamespace, "restore", p.RestoreName,
 		"--from-backup", p.BackupName, "--wait",
 	}
 	return nil
 }
 
 func (p *PVBackupFiltering) CreateResources() error {
-	p.Ctx, p.CtxCancel = context.WithTimeout(context.Background(), 30*time.Minute)
-	err := InstallStorageClass(p.Ctx, fmt.Sprintf("../testdata/storage-class/%s.yaml", VeleroCfg.CloudProvider))
+	err := InstallStorageClass(p.Ctx, fmt.Sprintf("../testdata/storage-class/%s.yaml", p.VeleroCfg.CloudProvider))
 	if err != nil {
 		return errors.Wrapf(err, "failed to install storage class for pv backup filtering test")
 	}
@@ -124,7 +120,7 @@ func (p *PVBackupFiltering) CreateResources() error {
 				for i, pod := range p.podsList[index] {
 					for j := range p.volumesList[i] {
 						Expect(CreateFileToPod(p.Ctx, ns, pod, pod, p.volumesList[i][j],
-							FILE_NAME, fileContent(ns, pod, p.volumesList[i][j]))).To(Succeed())
+							FILE_NAME, CreateFileContent(ns, pod, p.volumesList[i][j]))).To(Succeed())
 					}
 				}
 			})
@@ -175,9 +171,6 @@ func (p *PVBackupFiltering) Verify() error {
 
 	return nil
 }
-func fileContent(namespace, podName, volume string) string {
-	return fmt.Sprintf("ns-%s pod-%s volume-%s", namespace, podName, volume)
-}
 
 func fileExist(ctx context.Context, namespace, podName, volume string) error {
 	c, _, err := ReadFileFromPodVolume(ctx, namespace, podName, podName, volume, FILE_NAME)
@@ -186,7 +179,7 @@ func fileExist(ctx context.Context, namespace, podName, volume string) error {
 			FILE_NAME, volume, podName, namespace))
 	}
 	c = strings.Replace(c, "\n", "", -1)
-	origin_content := strings.Replace(fileContent(namespace, podName, volume), "\n", "", -1)
+	origin_content := strings.Replace(CreateFileContent(namespace, podName, volume), "\n", "", -1)
 	if c == origin_content {
 		return nil
 	} else {

@@ -23,11 +23,12 @@ import (
 	mock "github.com/stretchr/testify/mock"
 	volumesnapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
 
-	internalVolume "github.com/vmware-tanzu/velero/internal/volume"
 	itemoperation "github.com/vmware-tanzu/velero/pkg/itemoperation"
 	"github.com/vmware-tanzu/velero/pkg/persistence"
 	v1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
-	volume "github.com/vmware-tanzu/velero/pkg/volume"
+	"github.com/vmware-tanzu/velero/internal/volume"
+	"github.com/vmware-tanzu/velero/pkg/util/results"
+
 
 )
 
@@ -314,15 +315,75 @@ func (_m *BackupStore) GetRestoreItemOperations(name string) ([]*itemoperation.R
 }
 
 // GetRestoreItemOperations provides a mock function with given fields: name
-func (_m *BackupStore) GetBackupVolumeInfos(name string) ([]*internalVolume.VolumeInfo, error) {
+func (_m *BackupStore) GetBackupVolumeInfos(name string) ([]*volume.BackupVolumeInfo, error) {
 	ret := _m.Called(name)
 
-	var r0 []*internalVolume.VolumeInfo
-	if rf, ok := ret.Get(0).(func(string) []*internalVolume.VolumeInfo); ok {
+	var r0 []*volume.BackupVolumeInfo
+	if rf, ok := ret.Get(0).(func(string) []*volume.BackupVolumeInfo); ok {
 		r0 = rf(name)
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).([]*internalVolume.VolumeInfo)
+			r0 = ret.Get(0).([]*volume.BackupVolumeInfo)
+		}
+	}
+
+	var r1 error
+	if rf, ok := ret.Get(1).(func(string) error); ok {
+		r1 = rf(name)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// PutBackupVolumeInfos provides a mock function with given fields: name, volumeInfo
+func (_m *BackupStore) PutBackupVolumeInfos(name string, volumeInfo io.Reader) error {
+	ret := _m.Called(name, volumeInfo)
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(string, io.Reader) error); ok {
+		r0 = rf(name, volumeInfo)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
+// GetRestoreResults provides a mock function with given fields: name
+func (_m *BackupStore) GetRestoreResults(name string) (map[string]results.Result, error) {
+	ret := _m.Called(name)
+
+	r0 := make(map[string]results.Result)
+	if rf, ok := ret.Get(0).(func(string) map[string]results.Result); ok {
+		r0 = rf(name)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(map[string]results.Result)
+		}
+	}
+
+	var r1 error
+	if rf, ok := ret.Get(1).(func(string) error); ok {
+		r1 = rf(name)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// GetRestoredResourceList provides a mock function with given fields: name
+func (_m *BackupStore) GetRestoredResourceList(name string) (map[string][]string, error) {
+	ret := _m.Called(name)
+
+	r0 := make(map[string][]string)
+	if rf, ok := ret.Get(0).(func(string) map[string][]string); ok {
+		r0 = rf(name)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(map[string][]string)
 		}
 	}
 
@@ -485,6 +546,19 @@ func (_m *BackupStore) PutRestoredResourceList(restore string, results io.Reader
 	return r0
 }
 
+// PutRestoreVolumeInfo provides a mock function with given fields: restore, results
+func (_m *BackupStore) 	PutRestoreVolumeInfo(restore string, results io.Reader) error {
+	ret := _m.Called(restore, results)
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(string, io.Reader) error); ok {
+		r0 = rf(restore, results)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
 type mockConstructorTestingTNewBackupStore interface {
 	mock.TestingT
 	Cleanup(func())

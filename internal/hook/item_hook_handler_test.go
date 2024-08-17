@@ -1195,10 +1195,10 @@ func TestGroupRestoreExecHooks(t *testing.T) {
 		},
 	}
 
-	hookTracker := NewHookTracker()
+	hookTracker := NewMultiHookTracker()
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			actual, err := GroupRestoreExecHooks(tc.resourceRestoreHooks, tc.pod, velerotest.NewLogger(), hookTracker)
+			actual, err := GroupRestoreExecHooks("restore1", tc.resourceRestoreHooks, tc.pod, velerotest.NewLogger(), hookTracker)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expected, actual)
 		})
@@ -1976,7 +1976,7 @@ func TestValidateContainer(t *testing.T) {
 	expectedError := fmt.Errorf("invalid InitContainer in restore hook, it doesn't have Command, Name or Image field")
 
 	// valid string should return nil as result.
-	assert.Equal(t, nil, ValidateContainer([]byte(valid)))
+	assert.Nil(t, ValidateContainer([]byte(valid)))
 
 	// noName string should return expected error as result.
 	assert.Equal(t, expectedError, ValidateContainer([]byte(noName)))
@@ -2108,7 +2108,7 @@ func TestBackupHookTracker(t *testing.T) {
 			phase:                 PhasePre,
 			groupResource:         "pods",
 			hookTracker:           NewHookTracker(),
-			expectedHookAttempted: 3,
+			expectedHookAttempted: 4,
 			expectedHookFailed:    2,
 			pods: []podWithHook{
 				{
@@ -2351,14 +2351,12 @@ func TestBackupHookTracker(t *testing.T) {
 					}
 				}
 				h.HandleHooks(velerotest.NewLogger(), groupResource, pod.item, pod.hooks, test.phase, hookTracker)
-
 			}
 			actualAtemptted, actualFailed := hookTracker.Stat()
 			assert.Equal(t, test.expectedHookAttempted, actualAtemptted)
 			assert.Equal(t, test.expectedHookFailed, actualFailed)
 		})
 	}
-
 }
 
 func TestRestoreHookTrackerAdd(t *testing.T) {
@@ -2366,14 +2364,14 @@ func TestRestoreHookTrackerAdd(t *testing.T) {
 		name                 string
 		resourceRestoreHooks []ResourceRestoreHook
 		pod                  *corev1api.Pod
-		hookTracker          *HookTracker
+		hookTracker          *MultiHookTracker
 		expectedCnt          int
 	}{
 		{
 			name:                 "neither spec hooks nor annotations hooks are set",
 			resourceRestoreHooks: nil,
 			pod:                  builder.ForPod("default", "my-pod").Result(),
-			hookTracker:          NewHookTracker(),
+			hookTracker:          NewMultiHookTracker(),
 			expectedCnt:          0,
 		},
 		{
@@ -2392,7 +2390,7 @@ func TestRestoreHookTrackerAdd(t *testing.T) {
 					Name: "container1",
 				}).
 				Result(),
-			hookTracker: NewHookTracker(),
+			hookTracker: NewMultiHookTracker(),
 			expectedCnt: 1,
 		},
 		{
@@ -2430,7 +2428,7 @@ func TestRestoreHookTrackerAdd(t *testing.T) {
 					Name: "container2",
 				}).
 				Result(),
-			hookTracker: NewHookTracker(),
+			hookTracker: NewMultiHookTracker(),
 			expectedCnt: 2,
 		},
 		{
@@ -2465,16 +2463,19 @@ func TestRestoreHookTrackerAdd(t *testing.T) {
 					Name: "container1",
 				}).
 				Result(),
-			hookTracker: NewHookTracker(),
+			hookTracker: NewMultiHookTracker(),
 			expectedCnt: 1,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _ = GroupRestoreExecHooks(tc.resourceRestoreHooks, tc.pod, velerotest.NewLogger(), tc.hookTracker)
-			tracker := tc.hookTracker.GetTracker()
-			assert.Equal(t, tc.expectedCnt, len(tracker))
+			_, _ = GroupRestoreExecHooks("restore1", tc.resourceRestoreHooks, tc.pod, velerotest.NewLogger(), tc.hookTracker)
+			if _, ok := tc.hookTracker.trackers["restore1"]; !ok {
+				return
+			}
+			tracker := tc.hookTracker.trackers["restore1"].tracker
+			assert.Len(t, tracker, tc.expectedCnt)
 		})
 	}
 }

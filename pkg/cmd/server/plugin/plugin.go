@@ -23,14 +23,17 @@ import (
 
 	"github.com/vmware-tanzu/velero/pkg/datamover"
 
+	dia "github.com/vmware-tanzu/velero/internal/delete/actions/csi"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
-	"github.com/vmware-tanzu/velero/pkg/backup"
+	bia "github.com/vmware-tanzu/velero/pkg/backup/actions"
+	csibia "github.com/vmware-tanzu/velero/pkg/backup/actions/csi"
 	"github.com/vmware-tanzu/velero/pkg/client"
 	velerodiscovery "github.com/vmware-tanzu/velero/pkg/discovery"
 	"github.com/vmware-tanzu/velero/pkg/features"
 	veleroplugin "github.com/vmware-tanzu/velero/pkg/plugin/framework"
 	plugincommon "github.com/vmware-tanzu/velero/pkg/plugin/framework/common"
-	"github.com/vmware-tanzu/velero/pkg/restore"
+	ria "github.com/vmware-tanzu/velero/pkg/restore/actions"
+	csiria "github.com/vmware-tanzu/velero/pkg/restore/actions/csi"
 )
 
 func NewCommand(f client.Factory) *cobra.Command {
@@ -41,32 +44,142 @@ func NewCommand(f client.Factory) *cobra.Command {
 		Short:  "INTERNAL COMMAND ONLY - not intended to be run directly by users",
 		Run: func(c *cobra.Command, args []string) {
 			pluginServer = pluginServer.
-				RegisterBackupItemAction("velero.io/pv", newPVBackupItemAction).
-				RegisterBackupItemAction("velero.io/pod", newPodBackupItemAction).
-				RegisterBackupItemAction("velero.io/service-account", newServiceAccountBackupItemAction(f)).
-				RegisterRestoreItemAction("velero.io/job", newJobRestoreItemAction).
-				RegisterRestoreItemAction("velero.io/pod", newPodRestoreItemAction).
-				RegisterRestoreItemAction("velero.io/pod-volume-restore", newPodVolumeRestoreItemAction(f)).
-				RegisterRestoreItemAction("velero.io/init-restore-hook", newInitRestoreHookPodAction).
-				RegisterRestoreItemAction("velero.io/service", newServiceRestoreItemAction).
-				RegisterRestoreItemAction("velero.io/service-account", newServiceAccountRestoreItemAction).
-				RegisterRestoreItemAction("velero.io/add-pvc-from-pod", newAddPVCFromPodRestoreItemAction).
-				RegisterRestoreItemAction("velero.io/add-pv-from-pvc", newAddPVFromPVCRestoreItemAction).
-				RegisterRestoreItemAction("velero.io/change-storage-class", newChangeStorageClassRestoreItemAction(f)).
-				RegisterRestoreItemAction("velero.io/change-image-name", newChangeImageNameRestoreItemAction(f)).
-				RegisterRestoreItemAction("velero.io/role-bindings", newRoleBindingItemAction).
-				RegisterRestoreItemAction("velero.io/cluster-role-bindings", newClusterRoleBindingItemAction).
-				RegisterRestoreItemAction("velero.io/crd-preserve-fields", newCRDV1PreserveUnknownFieldsItemAction).
-				RegisterRestoreItemAction("velero.io/change-pvc-node-selector", newChangePVCNodeSelectorItemAction(f)).
-				RegisterRestoreItemAction("velero.io/apiservice", newAPIServiceRestoreItemAction).
-				RegisterRestoreItemAction("velero.io/admission-webhook-configuration", newAdmissionWebhookConfigurationAction).
-				RegisterRestoreItemAction("velero.io/secret", newSecretRestoreItemAction(f)).
-				RegisterRestoreItemAction("velero.io/dataupload", newDataUploadRetrieveAction(f)).
-				RegisterDeleteItemAction("velero.io/dataupload-delete", newDateUploadDeleteItemAction(f))
+				RegisterBackupItemAction(
+					"velero.io/pv",
+					newPVBackupItemAction,
+				).
+				RegisterBackupItemAction(
+					"velero.io/pod",
+					newPodBackupItemAction,
+				).
+				RegisterBackupItemAction(
+					"velero.io/service-account",
+					newServiceAccountBackupItemAction(f),
+				).
+				RegisterRestoreItemAction(
+					"velero.io/job",
+					newJobRestoreItemAction,
+				).
+				RegisterRestoreItemAction(
+					"velero.io/pod",
+					newPodRestoreItemAction,
+				).
+				RegisterRestoreItemAction(
+					"velero.io/pod-volume-restore",
+					newPodVolumeRestoreItemAction(f),
+				).
+				RegisterRestoreItemAction(
+					"velero.io/init-restore-hook",
+					newInitRestoreHookPodAction,
+				).
+				RegisterRestoreItemAction(
+					"velero.io/service",
+					newServiceRestoreItemAction,
+				).
+				RegisterRestoreItemAction(
+					"velero.io/service-account",
+					newServiceAccountRestoreItemAction,
+				).
+				RegisterRestoreItemAction(
+					"velero.io/add-pvc-from-pod",
+					newAddPVCFromPodRestoreItemAction,
+				).
+				RegisterRestoreItemAction(
+					"velero.io/add-pv-from-pvc",
+					newAddPVFromPVCRestoreItemAction,
+				).
+				RegisterRestoreItemAction(
+					"velero.io/change-storage-class",
+					newChangeStorageClassRestoreItemAction(f),
+				).
+				RegisterRestoreItemAction(
+					"velero.io/change-image-name",
+					newChangeImageNameRestoreItemAction(f),
+				).
+				RegisterRestoreItemAction(
+					"velero.io/role-bindings",
+					newRoleBindingItemAction,
+				).
+				RegisterRestoreItemAction(
+					"velero.io/cluster-role-bindings",
+					newClusterRoleBindingItemAction,
+				).
+				RegisterRestoreItemAction(
+					"velero.io/crd-preserve-fields",
+					newCRDV1PreserveUnknownFieldsItemAction,
+				).
+				RegisterRestoreItemAction(
+					"velero.io/change-pvc-node-selector",
+					newChangePVCNodeSelectorItemAction(f),
+				).
+				RegisterRestoreItemAction(
+					"velero.io/apiservice",
+					newAPIServiceRestoreItemAction,
+				).
+				RegisterRestoreItemAction(
+					"velero.io/admission-webhook-configuration",
+					newAdmissionWebhookConfigurationAction,
+				).
+				RegisterRestoreItemAction(
+					"velero.io/secret",
+					newSecretRestoreItemAction(f),
+				).
+				RegisterRestoreItemAction(
+					"velero.io/dataupload",
+					newDataUploadRetrieveAction(f),
+				).
+				RegisterDeleteItemAction(
+					"velero.io/dataupload-delete",
+					newDateUploadDeleteItemAction(f),
+				).
+				RegisterDeleteItemAction(
+					"velero.io/csi-volumesnapshot-delete",
+					newVolumeSnapshotDeleteItemAction(f),
+				).
+				RegisterDeleteItemAction(
+					"velero.io/csi-volumesnapshotcontent-delete",
+					newVolumeSnapshotContentDeleteItemAction(f),
+				).
+				RegisterBackupItemActionV2(
+					"velero.io/csi-pvc-backupper",
+					newPvcBackupItemAction(f),
+				).
+				RegisterBackupItemActionV2(
+					"velero.io/csi-volumesnapshot-backupper",
+					newVolumeSnapshotBackupItemAction(f),
+				).
+				RegisterBackupItemActionV2(
+					"velero.io/csi-volumesnapshotcontent-backupper",
+					newVolumeSnapshotContentBackupItemAction,
+				).
+				RegisterBackupItemActionV2(
+					"velero.io/csi-volumesnapshotclass-backupper",
+					newVolumeSnapshotClassBackupItemAction,
+				).
+				RegisterRestoreItemActionV2(
+					"velero.io/csi-pvc-restorer",
+					newPvcRestoreItemAction(f),
+				).
+				RegisterRestoreItemActionV2(
+					"velero.io/csi-volumesnapshot-restorer",
+					newVolumeSnapshotRestoreItemAction(f),
+				).
+				RegisterRestoreItemActionV2(
+					"velero.io/csi-volumesnapshotcontent-restorer",
+					newVolumeSnapshotContentRestoreItemAction,
+				).
+				RegisterRestoreItemActionV2(
+					"velero.io/csi-volumesnapshotclass-restorer",
+					newVolumeSnapshotClassRestoreItemAction,
+				)
 
 			if !features.IsEnabled(velerov1api.APIGroupVersionsFeatureFlag) {
-				// Do not register crd-remap-version BIA if the API Group feature flag is enabled, so that the v1 CRD can be backed up
-				pluginServer = pluginServer.RegisterBackupItemAction("velero.io/crd-remap-version", newRemapCRDVersionAction(f))
+				// Do not register crd-remap-version BIA if the API Group feature
+				// flag is enabled, so that the v1 CRD can be backed up.
+				pluginServer = pluginServer.RegisterBackupItemAction(
+					"velero.io/crd-remap-version",
+					newRemapCRDVersionAction(f),
+				)
 			}
 			pluginServer.Serve()
 		},
@@ -76,11 +189,11 @@ func NewCommand(f client.Factory) *cobra.Command {
 }
 
 func newPVBackupItemAction(logger logrus.FieldLogger) (interface{}, error) {
-	return backup.NewPVCAction(logger), nil
+	return bia.NewPVCAction(logger), nil
 }
 
 func newPodBackupItemAction(logger logrus.FieldLogger) (interface{}, error) {
-	return backup.NewPodAction(logger), nil
+	return bia.NewPodAction(logger), nil
 }
 
 func newServiceAccountBackupItemAction(f client.Factory) plugincommon.HandlerInitializer {
@@ -96,9 +209,9 @@ func newServiceAccountBackupItemAction(f client.Factory) plugincommon.HandlerIni
 			return nil, err
 		}
 
-		action, err := backup.NewServiceAccountAction(
+		action, err := bia.NewServiceAccountAction(
 			logger,
-			backup.NewClusterRoleBindingListerMap(clientset),
+			bia.NewClusterRoleBindingListerMap(clientset),
 			discoveryHelper)
 		if err != nil {
 			return nil, err
@@ -129,20 +242,20 @@ func newRemapCRDVersionAction(f client.Factory) plugincommon.HandlerInitializer 
 			return nil, err
 		}
 
-		return backup.NewRemapCRDVersionAction(logger, client.ApiextensionsV1beta1().CustomResourceDefinitions(), discoveryHelper), nil
+		return bia.NewRemapCRDVersionAction(logger, client.ApiextensionsV1beta1().CustomResourceDefinitions(), discoveryHelper), nil
 	}
 }
 
 func newJobRestoreItemAction(logger logrus.FieldLogger) (interface{}, error) {
-	return restore.NewJobAction(logger), nil
+	return ria.NewJobAction(logger), nil
 }
 
 func newPodRestoreItemAction(logger logrus.FieldLogger) (interface{}, error) {
-	return restore.NewPodAction(logger), nil
+	return ria.NewPodAction(logger), nil
 }
 
 func newInitRestoreHookPodAction(logger logrus.FieldLogger) (interface{}, error) {
-	return restore.NewInitRestoreHookPodAction(logger), nil
+	return ria.NewInitRestoreHookPodAction(logger), nil
 }
 
 func newPodVolumeRestoreItemAction(f client.Factory) plugincommon.HandlerInitializer {
@@ -157,28 +270,28 @@ func newPodVolumeRestoreItemAction(f client.Factory) plugincommon.HandlerInitial
 			return nil, err
 		}
 
-		return restore.NewPodVolumeRestoreAction(logger, client.CoreV1().ConfigMaps(f.Namespace()), crClient), nil
+		return ria.NewPodVolumeRestoreAction(logger, client.CoreV1().ConfigMaps(f.Namespace()), crClient), nil
 	}
 }
 
 func newServiceRestoreItemAction(logger logrus.FieldLogger) (interface{}, error) {
-	return restore.NewServiceAction(logger), nil
+	return ria.NewServiceAction(logger), nil
 }
 
 func newServiceAccountRestoreItemAction(logger logrus.FieldLogger) (interface{}, error) {
-	return restore.NewServiceAccountAction(logger), nil
+	return ria.NewServiceAccountAction(logger), nil
 }
 
 func newAddPVCFromPodRestoreItemAction(logger logrus.FieldLogger) (interface{}, error) {
-	return restore.NewAddPVCFromPodAction(logger), nil
+	return ria.NewAddPVCFromPodAction(logger), nil
 }
 
 func newAddPVFromPVCRestoreItemAction(logger logrus.FieldLogger) (interface{}, error) {
-	return restore.NewAddPVFromPVCAction(logger), nil
+	return ria.NewAddPVFromPVCAction(logger), nil
 }
 
 func newCRDV1PreserveUnknownFieldsItemAction(logger logrus.FieldLogger) (interface{}, error) {
-	return restore.NewCRDV1PreserveUnknownFieldsAction(logger), nil
+	return ria.NewCRDV1PreserveUnknownFieldsAction(logger), nil
 }
 
 func newChangeStorageClassRestoreItemAction(f client.Factory) plugincommon.HandlerInitializer {
@@ -188,7 +301,7 @@ func newChangeStorageClassRestoreItemAction(f client.Factory) plugincommon.Handl
 			return nil, err
 		}
 
-		return restore.NewChangeStorageClassAction(
+		return ria.NewChangeStorageClassAction(
 			logger,
 			client.CoreV1().ConfigMaps(f.Namespace()),
 			client.StorageV1().StorageClasses(),
@@ -203,18 +316,18 @@ func newChangeImageNameRestoreItemAction(f client.Factory) plugincommon.HandlerI
 			return nil, err
 		}
 
-		return restore.NewChangeImageNameAction(
+		return ria.NewChangeImageNameAction(
 			logger,
 			client.CoreV1().ConfigMaps(f.Namespace()),
 		), nil
 	}
 }
 func newRoleBindingItemAction(logger logrus.FieldLogger) (interface{}, error) {
-	return restore.NewRoleBindingAction(logger), nil
+	return ria.NewRoleBindingAction(logger), nil
 }
 
 func newClusterRoleBindingItemAction(logger logrus.FieldLogger) (interface{}, error) {
-	return restore.NewClusterRoleBindingAction(logger), nil
+	return ria.NewClusterRoleBindingAction(logger), nil
 }
 
 func newChangePVCNodeSelectorItemAction(f client.Factory) plugincommon.HandlerInitializer {
@@ -224,7 +337,7 @@ func newChangePVCNodeSelectorItemAction(f client.Factory) plugincommon.HandlerIn
 			return nil, err
 		}
 
-		return restore.NewChangePVCNodeSelectorAction(
+		return ria.NewChangePVCNodeSelectorAction(
 			logger,
 			client.CoreV1().ConfigMaps(f.Namespace()),
 			client.CoreV1().Nodes(),
@@ -233,11 +346,11 @@ func newChangePVCNodeSelectorItemAction(f client.Factory) plugincommon.HandlerIn
 }
 
 func newAPIServiceRestoreItemAction(logger logrus.FieldLogger) (interface{}, error) {
-	return restore.NewAPIServiceAction(logger), nil
+	return ria.NewAPIServiceAction(logger), nil
 }
 
 func newAdmissionWebhookConfigurationAction(logger logrus.FieldLogger) (interface{}, error) {
-	return restore.NewAdmissionWebhookConfigurationAction(logger), nil
+	return ria.NewAdmissionWebhookConfigurationAction(logger), nil
 }
 
 func newSecretRestoreItemAction(f client.Factory) plugincommon.HandlerInitializer {
@@ -246,7 +359,7 @@ func newSecretRestoreItemAction(f client.Factory) plugincommon.HandlerInitialize
 		if err != nil {
 			return nil, err
 		}
-		return restore.NewSecretAction(logger, client), nil
+		return ria.NewSecretAction(logger, client), nil
 	}
 }
 
@@ -257,7 +370,7 @@ func newDataUploadRetrieveAction(f client.Factory) plugincommon.HandlerInitializ
 			return nil, err
 		}
 
-		return restore.NewDataUploadRetrieveAction(logger, client), nil
+		return ria.NewDataUploadRetrieveAction(logger, client), nil
 	}
 }
 
@@ -269,4 +382,52 @@ func newDateUploadDeleteItemAction(f client.Factory) plugincommon.HandlerInitial
 		}
 		return datamover.NewDataUploadDeleteAction(logger, client), nil
 	}
+}
+
+// CSI plugin init functions.
+
+// BackupItemAction plugins
+
+func newPvcBackupItemAction(f client.Factory) plugincommon.HandlerInitializer {
+	return csibia.NewPvcBackupItemAction(f)
+}
+
+func newVolumeSnapshotBackupItemAction(f client.Factory) plugincommon.HandlerInitializer {
+	return csibia.NewVolumeSnapshotBackupItemAction(f)
+}
+
+func newVolumeSnapshotContentBackupItemAction(logger logrus.FieldLogger) (interface{}, error) {
+	return csibia.NewVolumeSnapshotContentBackupItemAction(logger)
+}
+
+func newVolumeSnapshotClassBackupItemAction(logger logrus.FieldLogger) (interface{}, error) {
+	return csibia.NewVolumeSnapshotClassBackupItemAction(logger)
+}
+
+// DeleteItemAction plugins
+
+func newVolumeSnapshotDeleteItemAction(f client.Factory) plugincommon.HandlerInitializer {
+	return dia.NewVolumeSnapshotDeleteItemAction(f)
+}
+
+func newVolumeSnapshotContentDeleteItemAction(f client.Factory) plugincommon.HandlerInitializer {
+	return dia.NewVolumeSnapshotContentDeleteItemAction(f)
+}
+
+// RestoreItemAction plugins
+
+func newPvcRestoreItemAction(f client.Factory) plugincommon.HandlerInitializer {
+	return csiria.NewPvcRestoreItemAction(f)
+}
+
+func newVolumeSnapshotRestoreItemAction(f client.Factory) plugincommon.HandlerInitializer {
+	return csiria.NewVolumeSnapshotRestoreItemAction(f)
+}
+
+func newVolumeSnapshotContentRestoreItemAction(logger logrus.FieldLogger) (interface{}, error) {
+	return csiria.NewVolumeSnapshotContentRestoreItemAction(logger)
+}
+
+func newVolumeSnapshotClassRestoreItemAction(logger logrus.FieldLogger) (interface{}, error) {
+	return csiria.NewVolumeSnapshotClassRestoreItemAction(logger)
 }

@@ -34,7 +34,7 @@ func TestAsyncBackup(t *testing.T) {
 	var asyncErr error
 	var asyncResult Result
 	finish := make(chan struct{})
-
+	var failErr = errors.New("fake-fail-error")
 	tests := []struct {
 		name         string
 		uploaderProv provider.Provider
@@ -49,12 +49,12 @@ func TestAsyncBackup(t *testing.T) {
 				OnCompleted: nil,
 				OnCancelled: nil,
 				OnFailed: func(ctx context.Context, namespace string, job string, err error) {
-					asyncErr = err
+					asyncErr = failErr
 					asyncResult = Result{}
 					finish <- struct{}{}
 				},
 			},
-			err: errors.New("fake-error"),
+			err: failErr,
 		},
 		{
 			name: "async backup cancel",
@@ -101,7 +101,7 @@ func TestAsyncBackup(t *testing.T) {
 			fs.callbacks = test.callbacks
 
 			err := fs.StartBackup(AccessPoint{ByPath: test.path}, "", "", false, nil, map[string]string{})
-			require.Equal(t, nil, err)
+			require.NoError(t, err)
 
 			<-finish
 
@@ -117,7 +117,7 @@ func TestAsyncRestore(t *testing.T) {
 	var asyncErr error
 	var asyncResult Result
 	finish := make(chan struct{})
-
+	var failErr = errors.New("fake-fail-error")
 	tests := []struct {
 		name         string
 		uploaderProv provider.Provider
@@ -133,12 +133,12 @@ func TestAsyncRestore(t *testing.T) {
 				OnCompleted: nil,
 				OnCancelled: nil,
 				OnFailed: func(ctx context.Context, namespace string, job string, err error) {
-					asyncErr = err
+					asyncErr = failErr
 					asyncResult = Result{}
 					finish <- struct{}{}
 				},
 			},
-			err: errors.New("fake-error"),
+			err: failErr,
 		},
 		{
 			name: "async restore cancel",
@@ -184,7 +184,7 @@ func TestAsyncRestore(t *testing.T) {
 			fs.callbacks = test.callbacks
 
 			err := fs.StartRestore(test.snapshot, AccessPoint{ByPath: test.path}, map[string]string{})
-			require.Equal(t, nil, err)
+			require.NoError(t, err)
 
 			<-finish
 

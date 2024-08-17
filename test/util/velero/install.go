@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	"golang.org/x/exp/slices"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -39,6 +40,7 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/cmd/cli/install"
 	velerexec "github.com/vmware-tanzu/velero/pkg/util/exec"
 	. "github.com/vmware-tanzu/velero/test"
+	. "github.com/vmware-tanzu/velero/test/util/eks"
 	. "github.com/vmware-tanzu/velero/test/util/k8s"
 )
 
@@ -74,8 +76,9 @@ func VeleroInstall(ctx context.Context, veleroCfg *VeleroConfig, isStandbyCluste
 	if isStandbyCluster {
 		veleroCfg.CloudProvider = veleroCfg.StandbyClusterCloudProvider
 	}
-	if veleroCfg.CloudProvider != "kind" {
-		fmt.Printf("For cloud platforms, object store plugin provider will be set as cloud provider")
+
+	if slices.Contains(PublicCloudProviders, veleroCfg.CloudProvider) {
+		fmt.Println("For public cloud platforms, object store plugin provider will be set as cloud provider")
 		// If ObjectStoreProvider is not provided, then using the value same as CloudProvider
 		if veleroCfg.ObjectStoreProvider == "" {
 			veleroCfg.ObjectStoreProvider = veleroCfg.CloudProvider
@@ -96,14 +99,14 @@ func VeleroInstall(ctx context.Context, veleroCfg *VeleroConfig, isStandbyCluste
 	}
 
 	// TODO - handle this better
-	if veleroCfg.CloudProvider == "vsphere" {
+	if veleroCfg.CloudProvider == Vsphere {
 		// We overrider the ObjectStoreProvider here for vSphere because we want to use the aws plugin for the
 		// backup, but needed to pick up the provider plugins earlier.  vSphere plugin no longer needs a Volume
 		// Snapshot location specified
 		if veleroCfg.ObjectStoreProvider == "" {
-			veleroCfg.ObjectStoreProvider = "aws"
+			veleroCfg.ObjectStoreProvider = AWS
 		}
-		if err := configvSpherePlugin(*veleroCfg.ClientToInstallVelero); err != nil {
+		if err := configvSpherePlugin(veleroCfg); err != nil {
 			return errors.WithMessagef(err, "Failed to config vsphere plugin")
 		}
 	}
@@ -112,27 +115,37 @@ func VeleroInstall(ctx context.Context, veleroCfg *VeleroConfig, isStandbyCluste
 	if err != nil {
 		return errors.WithMessagef(err, "Failed to get Velero InstallOptions for plugin provider %s", veleroCfg.ObjectStoreProvider)
 	}
-	veleroInstallOptions.UseVolumeSnapshots = veleroCfg.UseVolumeSnapshots
-	if !veleroCfg.UseRestic {
-		veleroInstallOptions.UseNodeAgent = veleroCfg.UseNodeAgent
-	}
-	veleroInstallOptions.UseRestic = veleroCfg.UseRestic
-	veleroInstallOptions.Image = veleroCfg.VeleroImage
-	veleroInstallOptions.Namespace = veleroCfg.VeleroNamespace
-	veleroInstallOptions.UploaderType = veleroCfg.UploaderType
-	GCFrequency, _ := time.ParseDuration(veleroCfg.GCFrequency)
-	veleroInstallOptions.GarbageCollectionFrequency = GCFrequency
-	veleroInstallOptions.PodVolumeOperationTimeout = veleroCfg.PodVolumeOperationTimeout
-	veleroInstallOptions.NodeAgentPodCPULimit = veleroCfg.NodeAgentPodCPULimit
-	veleroInstallOptions.NodeAgentPodCPURequest = veleroCfg.NodeAgentPodCPURequest
-	veleroInstallOptions.NodeAgentPodMemLimit = veleroCfg.NodeAgentPodMemLimit
-	veleroInstallOptions.NodeAgentPodMemRequest = veleroCfg.NodeAgentPodMemRequest
-	veleroInstallOptions.VeleroPodCPULimit = veleroCfg.VeleroPodCPULimit
-	veleroInstallOptions.VeleroPodCPURequest = veleroCfg.VeleroPodCPURequest
-	veleroInstallOptions.VeleroPodMemLimit = veleroCfg.VeleroPodMemLimit
-	veleroInstallOptions.VeleroPodMemRequest = veleroCfg.VeleroPodMemRequest
-	veleroInstallOptions.DisableInformerCache = veleroCfg.DisableInformerCache
 
+	// For AWS IRSA credential test, AWS IAM service account is required, so if ServiceAccountName and EKSPolicyARN
+	// are both provided, we assume IRSA test is running, otherwise skip this IAM service account creation part.
+	if veleroCfg.CloudProvider == AWS && veleroInstallOptions.ServiceAccountName != "" {
+		if veleroCfg.EKSPolicyARN == "" {
+			return errors.New("Please provide EKSPolicyARN for IRSA test.")
+		}
+		_, err = GetNamespace(ctx, *veleroCfg.ClientToInstallVelero, veleroCfg.VeleroNamespace)
+		// We should uninstall Velero for a new service account creation.
+		if !apierrors.IsNotFound(err) {
+			if err := VeleroUninstall(context.Background(), veleroCfg.VeleroCLI, veleroCfg.VeleroNamespace); err != nil {
+				return errors.Wrapf(err, "Failed to uninstall velero %s", veleroCfg.VeleroNamespace)
+			}
+		}
+		// If velero namespace does not exist, we should create it for service account creation
+		if err := KubectlCreateNamespace(ctx, veleroCfg.VeleroNamespace); err != nil {
+			return errors.Wrapf(err, "Failed to create namespace %s to install Velero", veleroCfg.VeleroNamespace)
+		}
+		if err := KubectlDeleteClusterRoleBinding(ctx, "velero-cluster-role"); err != nil {
+			return errors.Wrapf(err, "Failed to delete clusterrolebinding %s to %s namespace", "velero-cluster-role", veleroCfg.VeleroNamespace)
+		}
+		if err := KubectlCreateClusterRoleBinding(ctx, "velero-cluster-role", "cluster-admin", veleroCfg.VeleroNamespace, veleroInstallOptions.ServiceAccountName); err != nil {
+			return errors.Wrapf(err, "Failed to create clusterrolebinding %s to %s namespace", "velero-cluster-role", veleroCfg.VeleroNamespace)
+		}
+		if err := KubectlDeleteIAMServiceAcount(ctx, veleroInstallOptions.ServiceAccountName, veleroCfg.VeleroNamespace, veleroCfg.ClusterToInstallVelero); err != nil {
+			return errors.Wrapf(err, "Failed to delete service account %s to %s namespace", veleroInstallOptions.ServiceAccountName, veleroCfg.VeleroNamespace)
+		}
+		if err := EksctlCreateIAMServiceAcount(ctx, veleroInstallOptions.ServiceAccountName, veleroCfg.VeleroNamespace, veleroCfg.EKSPolicyARN, veleroCfg.ClusterToInstallVelero); err != nil {
+			return errors.Wrapf(err, "Failed to create service account %s to %s namespace", veleroInstallOptions.ServiceAccountName, veleroCfg.VeleroNamespace)
+		}
+	}
 	err = installVeleroServer(ctx, veleroCfg.VeleroCLI, veleroCfg.CloudProvider, &installOptions{
 		Options:                          veleroInstallOptions,
 		RegistryCredentialFile:           veleroCfg.RegistryCredentialFile,
@@ -142,6 +155,7 @@ func VeleroInstall(ctx context.Context, veleroCfg *VeleroConfig, isStandbyCluste
 	})
 
 	if err != nil {
+		time.Sleep(9 * time.Hour)
 		RunDebug(context.Background(), veleroCfg.VeleroCLI, veleroCfg.VeleroNamespace, "", "")
 		return errors.WithMessagef(err, "Failed to install Velero in the cluster")
 	}
@@ -150,34 +164,35 @@ func VeleroInstall(ctx context.Context, veleroCfg *VeleroConfig, isStandbyCluste
 }
 
 // configvSpherePlugin refers to https://github.com/vmware-tanzu/velero-plugin-for-vsphere/blob/v1.3.0/docs/vanilla.md
-func configvSpherePlugin(cli TestClient) error {
+func configvSpherePlugin(veleroCfg *VeleroConfig) error {
+	cli := veleroCfg.ClientToInstallVelero
 	var err error
 	vsphereSecret := "velero-vsphere-config-secret"
 	configmaptName := "velero-vsphere-plugin-config"
-	if err := clearupvSpherePluginConfig(cli.ClientGo, VeleroCfg.VeleroNamespace, vsphereSecret, configmaptName); err != nil {
-		return errors.WithMessagef(err, "Failed to clear up vsphere plugin config %s namespace", VeleroCfg.VeleroNamespace)
+	if err := clearupvSpherePluginConfig(cli.ClientGo, veleroCfg.VeleroNamespace, vsphereSecret, configmaptName); err != nil {
+		return errors.WithMessagef(err, "Failed to clear up vsphere plugin config %s namespace", veleroCfg.VeleroNamespace)
 	}
-	if err := CreateNamespace(context.Background(), cli, VeleroCfg.VeleroNamespace); err != nil {
-		return errors.WithMessagef(err, "Failed to create Velero %s namespace", VeleroCfg.VeleroNamespace)
+	if err := CreateNamespace(context.Background(), *cli, veleroCfg.VeleroNamespace); err != nil {
+		return errors.WithMessagef(err, "Failed to create Velero %s namespace", veleroCfg.VeleroNamespace)
 	}
-	if err := createVCCredentialSecret(cli.ClientGo, VeleroCfg.VeleroNamespace); err != nil {
-		return errors.WithMessagef(err, "Failed to create virtual center credential secret in %s namespace", VeleroCfg.VeleroNamespace)
+	if err := createVCCredentialSecret(cli.ClientGo, veleroCfg.VeleroNamespace); err != nil {
+		return errors.WithMessagef(err, "Failed to create virtual center credential secret in %s namespace", veleroCfg.VeleroNamespace)
 	}
-	if err := WaitForSecretsComplete(cli.ClientGo, VeleroCfg.VeleroNamespace, vsphereSecret); err != nil {
+	if err := WaitForSecretsComplete(cli.ClientGo, veleroCfg.VeleroNamespace, vsphereSecret); err != nil {
 		return errors.Wrap(err, "Failed to ensure velero-vsphere-config-secret secret completion in namespace kube-system")
 	}
-	_, err = CreateConfigMap(cli.ClientGo, VeleroCfg.VeleroNamespace, configmaptName, map[string]string{
+	_, err = CreateConfigMap(cli.ClientGo, veleroCfg.VeleroNamespace, configmaptName, map[string]string{
 		"cluster_flavor":           "VANILLA",
 		"vsphere_secret_name":      vsphereSecret,
-		"vsphere_secret_namespace": VeleroCfg.VeleroNamespace,
+		"vsphere_secret_namespace": veleroCfg.VeleroNamespace,
 	}, nil)
 	if err != nil {
-		return errors.WithMessagef(err, "Failed to create velero-vsphere-plugin-config configmap in %s namespace", VeleroCfg.VeleroNamespace)
+		return errors.WithMessagef(err, "Failed to create velero-vsphere-plugin-config configmap in %s namespace", veleroCfg.VeleroNamespace)
 	}
-	fmt.Println("configvSpherePlugin: WaitForConfigMapComplete")
-	err = WaitForConfigMapComplete(cli.ClientGo, VeleroCfg.VeleroNamespace, configmaptName)
+
+	err = WaitForConfigMapComplete(cli.ClientGo, veleroCfg.VeleroNamespace, configmaptName)
 	if err != nil {
-		return errors.Wrap(err, fmt.Sprintf("Failed to ensure configmap %s completion in namespace: %s", configmaptName, VeleroCfg.VeleroNamespace))
+		return errors.Wrap(err, fmt.Sprintf("Failed to ensure configmap %s completion in namespace: %s", configmaptName, veleroCfg.VeleroNamespace))
 	}
 	return nil
 }
@@ -239,8 +254,16 @@ func installVeleroServer(ctx context.Context, cli, cloudProvider string, options
 	if len(options.Prefix) > 0 {
 		args = append(args, "--prefix", options.Prefix)
 	}
-	if len(options.SecretFile) > 0 {
-		args = append(args, "--secret-file", options.SecretFile)
+	//Treat ServiceAccountName priority higher than SecretFile
+	if len(options.ServiceAccountName) > 0 {
+		args = append(args, "--service-account-name", options.ServiceAccountName)
+	} else {
+		if len(options.SecretFile) > 0 {
+			args = append(args, "--secret-file", options.SecretFile)
+		}
+	}
+	if options.NoSecret {
+		args = append(args, "--no-secret")
 	}
 	if len(options.VolumeSnapshotConfig.Data()) > 0 {
 		args = append(args, "--snapshot-location-config", options.VolumeSnapshotConfig.String())
@@ -257,18 +280,18 @@ func installVeleroServer(ctx context.Context, cli, cloudProvider string, options
 		}
 	}
 
-	fmt.Println("Start to install Azure VolumeSnapshotClass ...")
 	if len(options.Features) > 0 {
 		args = append(args, "--features", options.Features)
-		if strings.EqualFold(options.Features, FeatureCSI) && options.UseVolumeSnapshots {
-			if strings.EqualFold(cloudProvider, "azure") {
-				if err := KubectlApplyByFile(ctx, "../util/csi/AzureVolumeSnapshotClass.yaml"); err != nil {
-					return err
-				}
+		if !strings.EqualFold(cloudProvider, Vsphere) && strings.EqualFold(options.Features, FeatureCSI) && options.UseVolumeSnapshots {
+			// https://github.com/openebs/zfs-localpv/blob/develop/docs/snapshot.md
+			fmt.Printf("Start to install %s VolumeSnapshotClass ... \n", cloudProvider)
+			if err := KubectlApplyByFile(ctx, fmt.Sprintf("../testdata/volume-snapshot-class/%s.yaml", cloudProvider)); err != nil {
+				fmt.Println("Fail to install VolumeSnapshotClass when CSI feature is enabled: ", err)
+				return err
 			}
-
 		}
 	}
+
 	if options.GarbageCollectionFrequency > 0 {
 		args = append(args, fmt.Sprintf("--garbage-collection-frequency=%v", options.GarbageCollectionFrequency))
 	}
@@ -365,7 +388,7 @@ func createVelereResources(ctx context.Context, cli, namespace string, args []st
 		return errors.Wrapf(err, "failed to unmarshal the resources: %s", stdout)
 	}
 
-	if err = patchResources(ctx, resources, namespace, options); err != nil {
+	if err = patchResources(resources, namespace, options); err != nil {
 		return errors.Wrapf(err, "failed to patch resources")
 	}
 
@@ -387,7 +410,7 @@ func createVelereResources(ctx context.Context, cli, namespace string, args []st
 }
 
 // patch the velero resources
-func patchResources(ctx context.Context, resources *unstructured.UnstructuredList, namespace string, options *installOptions) error {
+func patchResources(resources *unstructured.UnstructuredList, namespace string, options *installOptions) error {
 	i := 0
 	size := 2
 	var deploy apps.Deployment
@@ -542,7 +565,9 @@ func waitVeleroReady(ctx context.Context, namespace string, useNodeAgent bool) e
 	return nil
 }
 
-func IsVeleroReady(ctx context.Context, namespace string, useNodeAgent bool) (bool, error) {
+func IsVeleroReady(ctx context.Context, veleroCfg *VeleroConfig) (bool, error) {
+	namespace := veleroCfg.VeleroNamespace
+	useNodeAgent := veleroCfg.UseNodeAgent
 	if useNodeAgent {
 		stdout, stderr, err := velerexec.RunCommand(exec.CommandContext(ctx, "kubectl", "get", "daemonset/node-agent",
 			"-o", "json", "-n", namespace))
@@ -573,26 +598,36 @@ func IsVeleroReady(ctx context.Context, namespace string, useNodeAgent bool) (bo
 		}
 	}
 
-	// Check BSL
-	stdout, stderr, err = velerexec.RunCommand(exec.CommandContext(ctx, "kubectl", "get", "bsl", "default",
-		"-o", "json", "-n", namespace))
+	// Check BSL with poll
+	err = wait.PollUntilContextTimeout(ctx, PollInterval, time.Minute, true, func(ctx context.Context) (bool, error) {
+		return checkBSL(ctx, veleroCfg) == nil, nil
+	})
 	if err != nil {
-		return false, errors.Wrapf(err, "failed to get bsl %s stdout=%s, stderr=%s", VeleroCfg.BSLBucket, stdout, stderr)
-	} else {
-		bsl := &velerov1api.BackupStorageLocation{}
-		if err = json.Unmarshal([]byte(stdout), bsl); err != nil {
-			return false, errors.Wrapf(err, "failed to unmarshal the velero bsl")
-		}
-		if bsl.Status.Phase != velerov1api.BackupStorageLocationPhaseAvailable {
-			return false, fmt.Errorf("current bsl %s is not available", VeleroCfg.BSLBucket)
-		}
+		return false, errors.Wrap(err, "failed to check the bsl")
 	}
-
 	return true, nil
 }
 
+func checkBSL(ctx context.Context, veleroCfg *VeleroConfig) error {
+	namespace := veleroCfg.VeleroNamespace
+	stdout, stderr, err := velerexec.RunCommand(exec.CommandContext(ctx, "kubectl", "get", "bsl", "default",
+		"-o", "json", "-n", namespace))
+	if err != nil {
+		return errors.Wrapf(err, "failed to get bsl %s stdout=%s, stderr=%s", veleroCfg.BSLBucket, stdout, stderr)
+	} else {
+		bsl := &velerov1api.BackupStorageLocation{}
+		if err = json.Unmarshal([]byte(stdout), bsl); err != nil {
+			return errors.Wrapf(err, "failed to unmarshal the velero bsl")
+		}
+		if bsl.Status.Phase != velerov1api.BackupStorageLocationPhaseAvailable {
+			return fmt.Errorf("current bsl %s is not available", veleroCfg.BSLBucket)
+		}
+	}
+	return nil
+}
+
 func PrepareVelero(ctx context.Context, caseName string, veleroCfg VeleroConfig) error {
-	ready, err := IsVeleroReady(context.Background(), veleroCfg.VeleroNamespace, veleroCfg.UseNodeAgent)
+	ready, err := IsVeleroReady(context.Background(), &veleroCfg)
 	if err != nil {
 		fmt.Printf("error in checking velero status with %v", err)
 		ctx, ctxCancel := context.WithTimeout(context.Background(), time.Minute*5)
@@ -614,6 +649,7 @@ func VeleroUninstall(ctx context.Context, cli, namespace string) error {
 		return errors.Wrapf(err, "failed to uninstall velero, stdout=%s, stderr=%s", stdout, stderr)
 	}
 	fmt.Println("Velero uninstalled ⛵")
+
 	return nil
 }
 

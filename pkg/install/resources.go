@@ -30,6 +30,8 @@ import (
 	v1crds "github.com/vmware-tanzu/velero/config/crd/v1/crds"
 	v2alpha1crds "github.com/vmware-tanzu/velero/config/crd/v2alpha1/crds"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	"github.com/vmware-tanzu/velero/pkg/repository"
+	"github.com/vmware-tanzu/velero/pkg/util/logging"
 )
 
 const (
@@ -39,15 +41,20 @@ const (
 )
 
 var (
-	DefaultVeleroPodCPURequest    = "500m"
-	DefaultVeleroPodMemRequest    = "128Mi"
-	DefaultVeleroPodCPULimit      = "1000m"
-	DefaultVeleroPodMemLimit      = "512Mi"
-	DefaultNodeAgentPodCPURequest = "500m"
-	DefaultNodeAgentPodMemRequest = "512Mi"
-	DefaultNodeAgentPodCPULimit   = "1000m"
-	DefaultNodeAgentPodMemLimit   = "1Gi"
-	DefaultVeleroNamespace        = "velero"
+	// default values for Velero server pod resource request/limit
+	DefaultVeleroPodCPURequest = "500m"
+	DefaultVeleroPodMemRequest = "128Mi"
+	DefaultVeleroPodCPULimit   = "1000m"
+	DefaultVeleroPodMemLimit   = "512Mi"
+
+	// default values for node-agent pod resource request/limit,
+	// "0" means no request/limit is set, so as to make the QoS as BestEffort
+	DefaultNodeAgentPodCPURequest = "0"
+	DefaultNodeAgentPodMemRequest = "0"
+	DefaultNodeAgentPodCPULimit   = "0"
+	DefaultNodeAgentPodMemLimit   = "0"
+
+	DefaultVeleroNamespace = "velero"
 )
 
 func Labels() map[string]string {
@@ -256,6 +263,9 @@ type VeleroOptions struct {
 	DefaultSnapshotMoveData         bool
 	DisableInformerCache            bool
 	ScheduleSkipImmediately         bool
+	FormatFlag                      *logging.FormatFlag
+	LogLevelFlag                    *logging.LevelFlag
+	MaintenanceCfg                  repository.MaintenanceConfig
 }
 
 func AllCRDs() *unstructured.UnstructuredList {
@@ -340,6 +350,7 @@ func AllResources(o *VeleroOptions) *unstructured.UnstructuredList {
 		WithPodVolumeOperationTimeout(o.PodVolumeOperationTimeout),
 		WithUploaderType(o.UploaderType),
 		WithScheduleSkipImmediately(o.ScheduleSkipImmediately),
+		WithMaintenanceConfig(o.MaintenanceCfg),
 	}
 
 	if len(o.Features) > 0 {

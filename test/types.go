@@ -27,7 +27,22 @@ import (
 
 const StorageClassName = "e2e-storage-class"
 const StorageClassName2 = "e2e-storage-class-2"
+const CSIStorageClassName = "e2e-csi-storage-class"
 const FeatureCSI = "EnableCSI"
+const VanillaZFS = "vanilla-zfs"
+const Kind = "kind"
+const Azure = "azure"
+const AzureCSI = "azure-csi"
+const AwsCSI = "aws-csi"
+const AWS = "aws"
+const Gcp = "gcp"
+const Vsphere = "vsphere"
+
+const UploaderTypeRestic = "restic"
+
+var PublicCloudProviders = []string{AWS, Azure, Gcp, Vsphere}
+var LocalCloudProviders = []string{Kind, VanillaZFS}
+var CloudProviders = append(PublicCloudProviders, LocalCloudProviders...)
 
 var InstallVelero bool
 var UUIDgen uuid.UUID
@@ -71,22 +86,30 @@ type VeleroConfig struct {
 	KibishiiDirectory                 string
 	Debug                             bool
 	GCFrequency                       string
-	DefaultCluster                    string
-	StandbyCluster                    string
+	DefaultClusterContext             string
+	StandbyClusterContext             string
 	ClientToInstallVelero             *TestClient
 	DefaultClient                     *TestClient
 	StandbyClient                     *TestClient
+	ClusterToInstallVelero            string
+	DefaultClusterName                string
+	StandbyClusterName                string
 	ProvideSnapshotsVolumeParam       bool
 	VeleroServerDebugMode             bool
 	SnapshotMoveData                  bool
 	DataMoverPlugin                   string
 	StandbyClusterCloudProvider       string
 	StandbyClusterPlugins             string
-	StandbyClusterOjbectStoreProvider string
+	StandbyClusterObjectStoreProvider string
 	DebugVeleroPodRestart             bool
 	IsUpgradeTest                     bool
 	WithoutDisableInformerCacheParam  bool
 	DisableInformerCache              bool
+	CreateClusterRoleBinding          bool
+	DefaultCLSServiceAccountName      string
+	StandbyCLSServiceAccountName      string
+	ServiceAccountNameToInstall       string
+	EKSPolicyARN                      string
 }
 
 type VeleroCfgInPerf struct {

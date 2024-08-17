@@ -20,26 +20,22 @@ import (
 	"context"
 	"time"
 
+	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
+	snapshotter "github.com/kubernetes-csi/external-snapshotter/client/v7/clientset/versioned/typed/volumesnapshot/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-
-	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
-
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
-
-	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
-
-	"github.com/vmware-tanzu/velero/pkg/util/csi"
-	"github.com/vmware-tanzu/velero/pkg/util/kube"
-
-	snapshotter "github.com/kubernetes-csi/external-snapshotter/client/v7/clientset/versioned/typed/volumesnapshot/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"github.com/vmware-tanzu/velero/pkg/nodeagent"
+	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
+	"github.com/vmware-tanzu/velero/pkg/util/csi"
+	"github.com/vmware-tanzu/velero/pkg/util/kube"
 )
 
 // CSISnapshotExposeParam define the input param for Expose of CSI snapshots
@@ -67,6 +63,9 @@ type CSISnapshotExposeParam struct {
 
 	// VolumeSize specifies the size of the source volume
 	VolumeSize resource.Quantity
+
+	// Affinity specifies the node affinity of the backup pod
+	Affinity *nodeagent.LoadAffinity
 }
 
 // CSISnapshotExposeWaitParam define the input param for WaitExposed of CSI snapshots
@@ -114,41 +113,6 @@ func (e *csiSnapshotExposer) Expose(ctx context.Context, ownerObject corev1.Obje
 
 	curLog.WithField("vsc name", vsc.Name).WithField("vs name", volumeSnapshot.Name).Infof("Got VSC from VS in namespace %s", volumeSnapshot.Namespace)
 
-	retained, err := csi.RetainVSC(ctx, e.csiSnapshotClient, vsc)
-	if err != nil {
-		return errors.Wrap(err, "error to retain volume snapshot content")
-	}
-
-	curLog.WithField("vsc name", vsc.Name).WithField("retained", (retained != nil)).Info("Finished to retain VSC")
-
-	defer func() {
-		if retained != nil {
-			csi.DeleteVolumeSnapshotContentIfAny(ctx, e.csiSnapshotClient, retained.Name, curLog)
-		}
-	}()
-
-	err = csi.EnsureDeleteVS(ctx, e.csiSnapshotClient, volumeSnapshot.Name, volumeSnapshot.Namespace, csiExposeParam.OperationTimeout)
-	if err != nil {
-		return errors.Wrap(err, "error to delete volume snapshot")
-	}
-
-	curLog.WithField("vs name", volumeSnapshot.Name).Infof("VS is deleted in namespace %s", volumeSnapshot.Namespace)
-
-	err = csi.RemoveVSCProtect(ctx, e.csiSnapshotClient, vsc.Name, csiExposeParam.ExposeTimeout)
-	if err != nil {
-		return errors.Wrap(err, "error to remove protect from volume snapshot content")
-	}
-
-	curLog.WithField("vsc name", vsc.Name).Infof("Removed protect from VSC")
-
-	err = csi.EnsureDeleteVSC(ctx, e.csiSnapshotClient, vsc.Name, csiExposeParam.OperationTimeout)
-	if err != nil {
-		return errors.Wrap(err, "error to delete volume snapshot content")
-	}
-
-	curLog.WithField("vsc name", vsc.Name).Infof("VSC is deleted")
-	retained = nil
-
 	backupVS, err := e.createBackupVS(ctx, ownerObject, volumeSnapshot)
 	if err != nil {
 		return errors.Wrap(err, "error to create backup volume snapshot")
@@ -168,6 +132,27 @@ func (e *csiSnapshotExposer) Expose(ctx context.Context, ownerObject corev1.Obje
 	}
 
 	curLog.WithField("vsc name", backupVSC.Name).Infof("Backup VSC is created from %s", vsc.Name)
+
+	retained, err := csi.RetainVSC(ctx, e.csiSnapshotClient, vsc)
+	if err != nil {
+		return errors.Wrap(err, "error to retain volume snapshot content")
+	}
+
+	curLog.WithField("vsc name", vsc.Name).WithField("retained", (retained != nil)).Info("Finished to retain VSC")
+
+	err = csi.EnsureDeleteVS(ctx, e.csiSnapshotClient, volumeSnapshot.Name, volumeSnapshot.Namespace, csiExposeParam.OperationTimeout)
+	if err != nil {
+		return errors.Wrap(err, "error to delete volume snapshot")
+	}
+
+	curLog.WithField("vs name", volumeSnapshot.Name).Infof("VS is deleted in namespace %s", volumeSnapshot.Namespace)
+
+	err = csi.EnsureDeleteVSC(ctx, e.csiSnapshotClient, vsc.Name, csiExposeParam.OperationTimeout)
+	if err != nil {
+		return errors.Wrap(err, "error to delete volume snapshot content")
+	}
+
+	curLog.WithField("vsc name", vsc.Name).Infof("VSC is deleted")
 
 	var volumeSize resource.Quantity
 	if volumeSnapshot.Status.RestoreSize != nil && !volumeSnapshot.Status.RestoreSize.IsZero() {
@@ -189,12 +174,12 @@ func (e *csiSnapshotExposer) Expose(ctx context.Context, ownerObject corev1.Obje
 		}
 	}()
 
-	backupPod, err := e.createBackupPod(ctx, ownerObject, backupPVC, csiExposeParam.HostingPodLabels)
+	backupPod, err := e.createBackupPod(ctx, ownerObject, backupPVC, csiExposeParam.HostingPodLabels, csiExposeParam.Affinity)
 	if err != nil {
 		return errors.Wrap(err, "error to create backup pod")
 	}
 
-	curLog.WithField("pod name", backupPod.Name).Info("Backup pod is created")
+	curLog.WithField("pod name", backupPod.Name).WithField("affinity", csiExposeParam.Affinity).Info("Backup pod is created")
 
 	defer func() {
 		if err != nil {
@@ -253,6 +238,30 @@ func (e *csiSnapshotExposer) GetExposed(ctx context.Context, ownerObject corev1.
 	curLog.WithField("pod", pod.Name).Infof("Backup volume is found in pod at index %v", i)
 
 	return &ExposeResult{ByPod: ExposeByPod{HostingPod: pod, VolumeName: volumeName}}, nil
+}
+
+func (e *csiSnapshotExposer) PeekExposed(ctx context.Context, ownerObject corev1.ObjectReference) error {
+	backupPodName := ownerObject.Name
+
+	curLog := e.log.WithFields(logrus.Fields{
+		"owner": ownerObject.Name,
+	})
+
+	pod, err := e.kubeClient.CoreV1().Pods(ownerObject.Namespace).Get(ctx, backupPodName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+
+	if err != nil {
+		curLog.WithError(err).Warnf("error to peek backup pod %s", backupPodName)
+		return nil
+	}
+
+	if podFailed, message := kube.IsPodUnrecoverable(pod, curLog); podFailed {
+		return errors.New(message)
+	}
+
+	return nil
 }
 
 func (e *csiSnapshotExposer) CleanUp(ctx context.Context, ownerObject corev1.ObjectReference, vsName string, sourceNamespace string) {
@@ -382,7 +391,8 @@ func (e *csiSnapshotExposer) createBackupPVC(ctx context.Context, ownerObject co
 	return created, err
 }
 
-func (e *csiSnapshotExposer) createBackupPod(ctx context.Context, ownerObject corev1.ObjectReference, backupPVC *corev1.PersistentVolumeClaim, label map[string]string) (*corev1.Pod, error) {
+func (e *csiSnapshotExposer) createBackupPod(ctx context.Context, ownerObject corev1.ObjectReference, backupPVC *corev1.PersistentVolumeClaim,
+	label map[string]string, affinity *nodeagent.LoadAffinity) (*corev1.Pod, error) {
 	podName := ownerObject.Name
 
 	volumeName := string(ownerObject.UID)
@@ -430,6 +440,7 @@ func (e *csiSnapshotExposer) createBackupPod(ctx context.Context, ownerObject co
 					},
 				},
 			},
+			Affinity: toSystemAffinity(affinity),
 			Containers: []corev1.Container{
 				{
 					Name:            containerName,
@@ -454,4 +465,43 @@ func (e *csiSnapshotExposer) createBackupPod(ctx context.Context, ownerObject co
 	}
 
 	return e.kubeClient.CoreV1().Pods(ownerObject.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+}
+
+func toSystemAffinity(loadAffinity *nodeagent.LoadAffinity) *corev1.Affinity {
+	if loadAffinity == nil {
+		return nil
+	}
+
+	requirements := []corev1.NodeSelectorRequirement{}
+	for k, v := range loadAffinity.NodeSelector.MatchLabels {
+		requirements = append(requirements, corev1.NodeSelectorRequirement{
+			Key:      k,
+			Values:   []string{v},
+			Operator: corev1.NodeSelectorOpIn,
+		})
+	}
+
+	for _, exp := range loadAffinity.NodeSelector.MatchExpressions {
+		requirements = append(requirements, corev1.NodeSelectorRequirement{
+			Key:      exp.Key,
+			Values:   exp.Values,
+			Operator: corev1.NodeSelectorOperator(exp.Operator),
+		})
+	}
+
+	if len(requirements) == 0 {
+		return nil
+	}
+
+	return &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{
+					{
+						MatchExpressions: requirements,
+					},
+				},
+			},
+		},
+	}
 }

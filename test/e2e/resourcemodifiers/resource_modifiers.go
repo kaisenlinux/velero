@@ -17,17 +17,13 @@ limitations under the License.
 package resourcemodifiers
 
 import (
-	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-
 	"github.com/pkg/errors"
 
-	. "github.com/vmware-tanzu/velero/test"
 	. "github.com/vmware-tanzu/velero/test/e2e/test"
 	. "github.com/vmware-tanzu/velero/test/util/k8s"
 )
@@ -74,19 +70,17 @@ func (r *ResourceModifiersCase) Init() error {
 
 	// assign values to the inner variable for specific case
 	r.yamlConfig = yamlData
-	r.VeleroCfg = VeleroCfg
-	r.Client = *r.VeleroCfg.ClientToInstallVelero
 	r.VeleroCfg.UseVolumeSnapshots = false
 	r.VeleroCfg.UseNodeAgent = false
 
 	r.BackupArgs = []string{
-		"create", "--namespace", VeleroCfg.VeleroNamespace, "backup", r.BackupName,
+		"create", "--namespace", r.VeleroCfg.VeleroNamespace, "backup", r.BackupName,
 		"--include-namespaces", strings.Join(*r.NSIncluded, ","),
 		"--snapshot-volumes=false", "--wait",
 	}
 
 	r.RestoreArgs = []string{
-		"create", "--namespace", VeleroCfg.VeleroNamespace, "restore", r.RestoreName,
+		"create", "--namespace", r.VeleroCfg.VeleroNamespace, "restore", r.RestoreName,
 		"--resource-modifier-configmap", r.cmName,
 		"--from-backup", r.BackupName, "--wait",
 	}
@@ -101,9 +95,6 @@ func (r *ResourceModifiersCase) Init() error {
 }
 
 func (r *ResourceModifiersCase) CreateResources() error {
-	// It's better to set a global timeout in CreateResources function which is the real beginning of one e2e test
-	r.Ctx, r.CtxCancel = context.WithTimeout(context.Background(), 10*time.Minute)
-
 	By(fmt.Sprintf("Create configmap %s in namespaces %s for workload\n", r.cmName, r.VeleroCfg.VeleroNamespace), func() {
 		Expect(CreateConfigMapFromYAMLData(r.Client.ClientGo, r.yamlConfig, r.cmName, r.VeleroCfg.VeleroNamespace)).To(Succeed(), fmt.Sprintf("Failed to create configmap %s in namespaces %s for workload\n", r.cmName, r.VeleroCfg.VeleroNamespace))
 	})
@@ -129,7 +120,7 @@ func (r *ResourceModifiersCase) Verify() error {
 	for _, ns := range *r.NSIncluded {
 		By("Verify deployment has updated values", func() {
 			deploy, err := GetDeployment(r.Client.ClientGo, ns, r.CaseBaseName)
-			Expect(err).To(BeNil(), fmt.Sprintf("Failed to get deployment %s in namespace %s", r.CaseBaseName, ns))
+			Expect(err).ToNot(HaveOccurred(), fmt.Sprintf("Failed to get deployment %s in namespace %s", r.CaseBaseName, ns))
 
 			Expect(*deploy.Spec.Replicas).To(Equal(int32(2)), fmt.Sprintf("Failed to verify deployment %s's replicas in namespace %s", r.CaseBaseName, ns))
 			Expect(deploy.Spec.Template.Spec.Containers[1].Image).To(Equal("nginx:1.14.2"), fmt.Sprintf("Failed to verify deployment %s's image in namespace %s", r.CaseBaseName, ns))

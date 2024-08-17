@@ -40,7 +40,7 @@ import (
 	"github.com/vmware-tanzu/velero/internal/credentials"
 	"github.com/vmware-tanzu/velero/internal/resourcepolicies"
 	"github.com/vmware-tanzu/velero/internal/storage"
-	internalVolume "github.com/vmware-tanzu/velero/internal/volume"
+	"github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	pkgbackup "github.com/vmware-tanzu/velero/pkg/backup"
 	"github.com/vmware-tanzu/velero/pkg/discovery"
@@ -56,7 +56,6 @@ import (
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 	"github.com/vmware-tanzu/velero/pkg/util/logging"
 	"github.com/vmware-tanzu/velero/pkg/util/results"
-	"github.com/vmware-tanzu/velero/pkg/volume"
 )
 
 const (
@@ -252,8 +251,6 @@ func (b *backupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if err := kubeutil.PatchResource(original, request.Backup, b.kbClient); err != nil {
 		return ctrl.Result{}, errors.Wrapf(err, "error updating Backup status to %s", request.Status.Phase)
 	}
-	// store ref to just-updated item for creating patch
-	original = request.Backup.DeepCopy()
 
 	backupScheduleName := request.GetLabels()[velerov1api.ScheduleNameLabel]
 
@@ -264,6 +261,9 @@ func (b *backupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 		return ctrl.Result{}, nil
 	}
+
+	// store ref to just-updated item for creating patch
+	original = request.Backup.DeepCopy()
 
 	b.backupTracker.Add(request.Namespace, request.Name)
 	defer func() {
@@ -431,7 +431,7 @@ func (b *backupReconciler) prepareBackupRequest(backup *velerov1api.Backup, logg
 	// Add namespaces with label velero.io/exclude-from-backup=true into request.Spec.ExcludedNamespaces
 	// Essentially, adding the label velero.io/exclude-from-backup=true to a namespace would be equivalent to setting spec.ExcludedNamespaces
 	namespaces := corev1api.NamespaceList{}
-	if err := b.kbClient.List(context.Background(), &namespaces, kbclient.MatchingLabels{"velero.io/exclude-from-backup": "true"}); err == nil {
+	if err := b.kbClient.List(context.Background(), &namespaces, kbclient.MatchingLabels{velerov1api.ExcludeFromBackupLabel: "true"}); err == nil {
 		for _, ns := range namespaces.Items {
 			request.Spec.ExcludedNamespaces = append(request.Spec.ExcludedNamespaces, ns.Name)
 		}
@@ -464,7 +464,7 @@ func (b *backupReconciler) prepareBackupRequest(backup *velerov1api.Backup, logg
 	}
 
 	// validate the included/excluded namespaces
-	for _, err := range collections.ValidateNamespaceIncludesExcludes(request.Spec.IncludedNamespaces, request.Spec.ExcludedNamespaces) {
+	for _, err := range b.validateNamespaceIncludesExcludes(request.Spec.IncludedNamespaces, request.Spec.ExcludedNamespaces) {
 		request.Status.ValidationErrors = append(request.Status.ValidationErrors, fmt.Sprintf("Invalid included/excluded namespace lists: %v", err))
 	}
 
@@ -503,11 +503,6 @@ func (b *backupReconciler) prepareBackupRequest(backup *velerov1api.Backup, logg
 func (b *backupReconciler) validateAndGetSnapshotLocations(backup *velerov1api.Backup) (map[string]*velerov1api.VolumeSnapshotLocation, []string) {
 	errors := []string{}
 	providerLocations := make(map[string]*velerov1api.VolumeSnapshotLocation)
-
-	// if snapshotVolume is set to false then we don't need to validate volumesnapshotlocation
-	if boolptr.IsSetToFalse(backup.Spec.SnapshotVolumes) {
-		return nil, nil
-	}
 
 	for _, locationName := range backup.Spec.VolumeSnapshotLocations {
 		// validate each locationName exists as a VolumeSnapshotLocation
@@ -587,7 +582,7 @@ func (b *backupReconciler) validateAndGetSnapshotLocations(backup *velerov1api.B
 
 	// add credential to config for each location
 	for _, location := range providerLocations {
-		err = internalVolume.UpdateVolumeSnapshotLocationWithCredentialConfig(location, b.credentialFileStore)
+		err = volume.UpdateVolumeSnapshotLocationWithCredentialConfig(location, b.credentialFileStore)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("error adding credentials to volume snapshot location named %s: %v", location.Name, err))
 			continue
@@ -599,6 +594,24 @@ func (b *backupReconciler) validateAndGetSnapshotLocations(backup *velerov1api.B
 	}
 
 	return providerLocations, nil
+}
+
+func (b *backupReconciler) validateNamespaceIncludesExcludes(includedNamespaces, excludedNamespaces []string) []error {
+	var errs []error
+	if errs = collections.ValidateNamespaceIncludesExcludes(includedNamespaces, excludedNamespaces); len(errs) > 0 {
+		return errs
+	}
+
+	namespace := &corev1api.Namespace{}
+	for _, name := range collections.NewIncludesExcludes().Includes(includedNamespaces...).GetIncludes() {
+		if name == "" || name == "*" {
+			continue
+		}
+		if err := b.kbClient.Get(context.Background(), kbclient.ObjectKey{Name: name}, namespace); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errs
 }
 
 // runBackup runs and uploads a validated backup. Any error returned from this function
@@ -674,7 +687,7 @@ func (b *backupReconciler) runBackup(backup *pkgbackup.Request) error {
 	// Completed yet.
 	inProgressOperations, _, opsCompleted, opsFailed, errs := getBackupItemOperationProgress(backup.Backup, pluginManager, *backup.GetItemOperationsList())
 	if len(errs) > 0 {
-		for err := range errs {
+		for _, err := range errs {
 			backupLog.Error(err)
 		}
 	}

@@ -23,7 +23,7 @@ import "fmt"
 
 var (
 	// Version is the current version of Velero, set by the go linker's -X flag at build time.
-	Version string
+	Version = "1.14.0"
 
 	// GitSHA is the actual commit that is being built, set by the go linker's -X flag at build time.
 	GitSHA string
