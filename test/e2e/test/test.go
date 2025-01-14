@@ -23,7 +23,7 @@ import (
 	"strings"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/pkg/errors"
 
@@ -91,8 +91,9 @@ func TestFuncWithMultiIt(tests []VeleroBackupRestoreTest) func() {
 }
 
 func TestIt(test VeleroBackupRestoreTest) error {
-	test.Init()
-	It(test.GetTestMsg().Text, func() {
+	It("Run E2E test case", func() {
+		Expect(test.Init()).To(Succeed())
+
 		Expect(RunTestCase(test)).To(Succeed(), test.GetTestMsg().FailedMSG)
 	})
 	return nil
@@ -182,7 +183,9 @@ func (t *TestCase) Start() error {
 
 func (t *TestCase) Clean() error {
 	veleroCfg := t.GetTestCase().VeleroCfg
-	if !veleroCfg.Debug {
+	if CurrentSpecReport().Failed() && veleroCfg.FailFast {
+		fmt.Println("Test case failed and fail fast is enabled. Skip resource clean up.")
+	} else {
 		By(fmt.Sprintf("Clean namespace with prefix %s after test", t.CaseBaseName), func() {
 			if err := CleanupNamespaces(t.Ctx, t.Client, t.CaseBaseName); err != nil {
 				fmt.Println("Fail to cleanup namespaces: ", err)
@@ -195,6 +198,7 @@ func (t *TestCase) Clean() error {
 			}
 		})
 	}
+
 	return nil
 }
 
@@ -210,6 +214,7 @@ func RunTestCase(test VeleroBackupRestoreTest) error {
 	if test == nil {
 		return errors.New("No case should be tested")
 	}
+	fmt.Println("Running case: ", test.GetTestMsg().Text)
 	test.Start()
 	defer test.GetTestCase().CtxCancel()
 

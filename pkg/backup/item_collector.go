@@ -116,8 +116,7 @@ func (nt *nsTracker) init(
 	for _, namespace := range unstructuredNSs {
 		if nt.singleLabelSelector != nil &&
 			nt.singleLabelSelector.Matches(labels.Set(namespace.GetLabels())) {
-			nt.logger.Debugf(`Track namespace %s, 
-				because its labels match backup LabelSelector.`,
+			nt.logger.Debugf("Track namespace %s, because its labels match backup LabelSelector.",
 				namespace.GetName(),
 			)
 
@@ -128,8 +127,7 @@ func (nt *nsTracker) init(
 		if len(nt.orLabelSelector) > 0 {
 			for _, selector := range nt.orLabelSelector {
 				if selector.Matches(labels.Set(namespace.GetLabels())) {
-					nt.logger.Debugf(`Track namespace %s",
-						"because its labels match the backup OrLabelSelector.`,
+					nt.logger.Debugf("Track namespace %s, because its labels match the backup OrLabelSelector.",
 						namespace.GetName(),
 					)
 					nt.track(namespace.GetName())
@@ -148,8 +146,7 @@ func (nt *nsTracker) init(
 		}
 
 		if nt.namespaceFilter.ShouldInclude(namespace.GetName()) {
-			nt.logger.Debugf(`Track namespace %s,
-				because its name match the backup namespace filter.`,
+			nt.logger.Debugf("Track namespace %s, because its name match the backup namespace filter.",
 				namespace.GetName(),
 			)
 			nt.track(namespace.GetName())
@@ -178,6 +175,8 @@ type kubernetesResource struct {
 	groupResource         schema.GroupResource
 	preferredGVR          schema.GroupVersionResource
 	namespace, name, path string
+	orderedResource       bool
+	inItemBlock           bool // set to true during backup processing when added to an ItemBlock
 }
 
 // getItemsFromResourceIdentifiers get the kubernetesResources
@@ -294,6 +293,7 @@ func sortResourcesByOrder(
 	// First select items from the order
 	for _, name := range order {
 		if item, ok := itemMap[name]; ok {
+			item.orderedResource = true
 			sortedItems = append(sortedItems, item)
 			log.Debugf("%s added to sorted resource list.", item.name)
 			delete(itemMap, name)
@@ -739,6 +739,23 @@ func (r *itemCollector) collectNamespaces(
 	if err != nil {
 		log.WithError(errors.WithStack(err)).Error("error list namespaces")
 		return nil, errors.WithStack(err)
+	}
+
+	for _, includedNSName := range r.backupRequest.Backup.Spec.IncludedNamespaces {
+		nsExists := false
+		// Skip checking the namespace existing when it's "*".
+		if includedNSName == "*" {
+			continue
+		}
+		for _, unstructuredNS := range unstructuredList.Items {
+			if unstructuredNS.GetName() == includedNSName {
+				nsExists = true
+			}
+		}
+
+		if !nsExists {
+			log.Errorf("fail to get the namespace %s specified in backup.Spec.IncludedNamespaces", includedNSName)
+		}
 	}
 
 	var singleSelector labels.Selector

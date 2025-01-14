@@ -131,22 +131,33 @@ func (c *PodVolumeRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	pvr.Status.Phase = velerov1api.PodVolumeRestorePhaseInProgress
 	pvr.Status.StartTimestamp = &metav1.Time{Time: c.clock.Now()}
 	if err = c.Patch(ctx, pvr, client.MergeFrom(original)); err != nil {
+		c.closeDataPath(ctx, pvr.Name)
 		return c.errorOut(ctx, pvr, err, "error to update status to in progress", log)
 	}
 
 	volumePath, err := exposer.GetPodVolumeHostPath(ctx, pod, pvr.Spec.Volume, c.Client, c.fileSystem, log)
 	if err != nil {
+		c.closeDataPath(ctx, pvr.Name)
 		return c.errorOut(ctx, pvr, err, "error exposing host path for pod volume", log)
 	}
 
 	log.WithField("path", volumePath.ByPath).Debugf("Found host path")
 
-	if err := fsRestore.Init(ctx, pvr.Spec.BackupStorageLocation, pvr.Spec.SourceNamespace, pvr.Spec.UploaderType,
-		podvolume.GetPvrRepositoryType(pvr), pvr.Spec.RepoIdentifier, c.repositoryEnsurer, c.credentialGetter); err != nil {
+	if err := fsRestore.Init(ctx, &datapath.FSBRInitParam{
+		BSLName:           pvr.Spec.BackupStorageLocation,
+		SourceNamespace:   pvr.Spec.SourceNamespace,
+		UploaderType:      pvr.Spec.UploaderType,
+		RepositoryType:    podvolume.GetPvrRepositoryType(pvr),
+		RepoIdentifier:    pvr.Spec.RepoIdentifier,
+		RepositoryEnsurer: c.repositoryEnsurer,
+		CredentialGetter:  c.credentialGetter,
+	}); err != nil {
+		c.closeDataPath(ctx, pvr.Name)
 		return c.errorOut(ctx, pvr, err, "error to initialize data path", log)
 	}
 
 	if err := fsRestore.StartRestore(pvr.Spec.SnapshotID, volumePath, pvr.Spec.UploaderSettings); err != nil {
+		c.closeDataPath(ctx, pvr.Name)
 		return c.errorOut(ctx, pvr, err, "error starting data path restore", log)
 	}
 
@@ -156,7 +167,6 @@ func (c *PodVolumeRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Req
 }
 
 func (c *PodVolumeRestoreReconciler) errorOut(ctx context.Context, pvr *velerov1api.PodVolumeRestore, err error, msg string, log logrus.FieldLogger) (ctrl.Result, error) {
-	c.closeDataPath(ctx, pvr.Name)
 	_ = UpdatePVRStatusToFailed(ctx, c.Client, pvr, errors.WithMessage(err, msg).Error(), c.clock.Now(), log)
 	return ctrl.Result{}, err
 }
@@ -258,7 +268,7 @@ func getInitContainerIndex(pod *corev1api.Pod) int {
 }
 
 func (c *PodVolumeRestoreReconciler) OnDataPathCompleted(ctx context.Context, namespace string, pvrName string, result datapath.Result) {
-	defer c.closeDataPath(ctx, pvrName)
+	defer c.dataPathMgr.RemoveAsyncBR(pvrName)
 
 	log := c.logger.WithField("pvr", pvrName)
 
@@ -318,7 +328,7 @@ func (c *PodVolumeRestoreReconciler) OnDataPathCompleted(ctx context.Context, na
 }
 
 func (c *PodVolumeRestoreReconciler) OnDataPathFailed(ctx context.Context, namespace string, pvrName string, err error) {
-	defer c.closeDataPath(ctx, pvrName)
+	defer c.dataPathMgr.RemoveAsyncBR(pvrName)
 
 	log := c.logger.WithField("pvr", pvrName)
 
@@ -333,7 +343,7 @@ func (c *PodVolumeRestoreReconciler) OnDataPathFailed(ctx context.Context, names
 }
 
 func (c *PodVolumeRestoreReconciler) OnDataPathCancelled(ctx context.Context, namespace string, pvrName string) {
-	defer c.closeDataPath(ctx, pvrName)
+	defer c.dataPathMgr.RemoveAsyncBR(pvrName)
 
 	log := c.logger.WithField("pvr", pvrName)
 

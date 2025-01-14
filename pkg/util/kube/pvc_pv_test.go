@@ -29,7 +29,6 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	corev1api "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
 	storagev1api "k8s.io/api/storage/v1"
 
 	clientTesting "k8s.io/client-go/testing"
@@ -333,6 +332,7 @@ func TestDeletePVCIfAny(t *testing.T) {
 		logMessage    string
 		logLevel      string
 		logError      string
+		ensureTimeout time.Duration
 	}{
 		{
 			name:         "pvc not found",
@@ -362,22 +362,6 @@ func TestDeletePVCIfAny(t *testing.T) {
 			pvcName:      "fake-pvc",
 			pvcNamespace: "fake-namespace",
 			pvName:       "fake-pv",
-			kubeReactors: []reactor{
-				{
-					verb:     "get",
-					resource: "persistentvolumeclaims",
-					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
-						return true, pvcObject, nil
-					},
-				},
-				{
-					verb:     "delete",
-					resource: "persistentvolumeclaims",
-					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
-						return true, nil, nil
-					},
-				},
-			},
 			kubeClientObj: []runtime.Object{
 				pvcObject,
 				pvObject,
@@ -392,13 +376,6 @@ func TestDeletePVCIfAny(t *testing.T) {
 			pvName:       "fake-pv",
 			kubeReactors: []reactor{
 				{
-					verb:     "get",
-					resource: "persistentvolumeclaims",
-					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
-						return true, pvcObject, nil
-					},
-				},
-				{
 					verb:     "delete",
 					resource: "persistentvolumeclaims",
 					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
@@ -407,10 +384,10 @@ func TestDeletePVCIfAny(t *testing.T) {
 				},
 			},
 			kubeClientObj: []runtime.Object{
-				pvcObject,
+				pvcWithVolume,
 				pvObject,
 			},
-			logMessage: "failed to delete pvc fake-namespace/fake-pvc with err fake-delete-error",
+			logMessage: "failed to delete pvc fake-namespace/fake-pvc with err error to delete pvc fake-pvc: fake-delete-error",
 			logLevel:   "level=warning",
 		},
 		{
@@ -424,13 +401,6 @@ func TestDeletePVCIfAny(t *testing.T) {
 					resource: "persistentvolumes",
 					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
 						return true, nil, errors.New("fake-get-error")
-					},
-				},
-				{
-					verb:     "get",
-					resource: "persistentvolumeclaims",
-					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
-						return true, pvcWithVolume, nil
 					},
 				},
 			},
@@ -452,20 +422,6 @@ func TestDeletePVCIfAny(t *testing.T) {
 			},
 			kubeReactors: []reactor{
 				{
-					verb:     "get",
-					resource: "persistentvolumeclaims",
-					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
-						return true, pvcWithVolume, nil
-					},
-				},
-				{
-					verb:     "get",
-					resource: "persistentvolumes",
-					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
-						return true, pvObject, nil
-					},
-				},
-				{
 					verb:     "patch",
 					resource: "persistentvolumes",
 					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
@@ -486,28 +442,39 @@ func TestDeletePVCIfAny(t *testing.T) {
 				pvcWithVolume,
 				pvObject,
 			},
+		},
+		{
+			name:         "delete pv pvc success but wait fail",
+			pvcName:      "fake-pvc",
+			pvcNamespace: "fake-namespace",
+			pvName:       "fake-pv",
+			kubeClientObj: []runtime.Object{
+				pvcWithVolume,
+				pvObject,
+			},
 			kubeReactors: []reactor{
 				{
-					verb:     "get",
+					verb:     "delete",
 					resource: "persistentvolumeclaims",
 					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
 						return true, pvcWithVolume, nil
 					},
 				},
-				{
-					verb:     "get",
-					resource: "persistentvolumes",
-					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
-						return true, pvObject, nil
-					},
-				},
-				{
-					verb:     "patch",
-					resource: "persistentvolumes",
-					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
-						return true, pvObject, nil
-					},
-				},
+			},
+			ensureTimeout: time.Second,
+			logMessage:    "failed to delete pvc fake-namespace/fake-pvc with err error to ensure pvc deleted for fake-pvc: context deadline exceeded",
+			logLevel:      "level=warning",
+		},
+		{
+			name:         "delete pv pvc success, wait won't succeed but ensureTimeout is 0",
+			pvcName:      "fake-pvc",
+			pvcNamespace: "fake-namespace",
+			pvName:       "fake-pv",
+			kubeClientObj: []runtime.Object{
+				pvcWithVolume,
+				pvObject,
+			},
+			kubeReactors: []reactor{
 				{
 					verb:     "delete",
 					resource: "persistentvolumeclaims",
@@ -530,7 +497,7 @@ func TestDeletePVCIfAny(t *testing.T) {
 			var kubeClient kubernetes.Interface = fakeKubeClient
 
 			logMessage := ""
-			DeletePVAndPVCIfAny(context.Background(), kubeClient.CoreV1(), test.pvcName, test.pvcNamespace, velerotest.NewSingleLogger(&logMessage))
+			DeletePVAndPVCIfAny(context.Background(), kubeClient.CoreV1(), test.pvcName, test.pvcNamespace, test.ensureTimeout, velerotest.NewSingleLogger(&logMessage))
 
 			if len(test.logMessage) > 0 {
 				assert.Contains(t, logMessage, test.logMessage)
@@ -623,6 +590,7 @@ func TestEnsureDeletePVC(t *testing.T) {
 		pvcName   string
 		namespace string
 		reactors  []reactor
+		timeout   time.Duration
 		err       string
 	}{
 		{
@@ -632,10 +600,26 @@ func TestEnsureDeletePVC(t *testing.T) {
 			err:       "error to delete pvc fake-pvc: persistentvolumeclaims \"fake-pvc\" not found",
 		},
 		{
+			name:      "0 timeout",
+			pvcName:   "fake-pvc",
+			namespace: "fake-ns",
+			clientObj: []runtime.Object{pvcObject},
+			reactors: []reactor{
+				{
+					verb:     "delete",
+					resource: "persistentvolumeclaims",
+					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
+						return true, pvcObject, nil
+					},
+				},
+			},
+		},
+		{
 			name:      "wait fail",
 			pvcName:   "fake-pvc",
 			namespace: "fake-ns",
 			clientObj: []runtime.Object{pvcObject},
+			timeout:   time.Millisecond,
 			reactors: []reactor{
 				{
 					verb:     "get",
@@ -645,7 +629,24 @@ func TestEnsureDeletePVC(t *testing.T) {
 					},
 				},
 			},
-			err: "error to retrieve pvc info for fake-pvc: error to get pvc fake-pvc: fake-get-error",
+			err: "error to ensure pvc deleted for fake-pvc: error to get pvc fake-pvc: fake-get-error",
+		},
+		{
+			name:      "wait timeout",
+			pvcName:   "fake-pvc",
+			namespace: "fake-ns",
+			clientObj: []runtime.Object{pvcObject},
+			timeout:   time.Millisecond,
+			reactors: []reactor{
+				{
+					verb:     "delete",
+					resource: "persistentvolumeclaims",
+					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
+						return true, pvcObject, nil
+					},
+				},
+			},
+			err: "error to ensure pvc deleted for fake-pvc: context deadline exceeded",
 		},
 	}
 
@@ -659,7 +660,7 @@ func TestEnsureDeletePVC(t *testing.T) {
 
 			var kubeClient kubernetes.Interface = fakeKubeClient
 
-			err := EnsureDeletePVC(context.Background(), kubeClient.CoreV1(), test.pvcName, test.namespace, time.Millisecond)
+			err := EnsureDeletePVC(context.Background(), kubeClient.CoreV1(), test.pvcName, test.namespace, test.timeout)
 			if err != nil {
 				assert.EqualError(t, err, test.err)
 			} else {
@@ -1126,41 +1127,41 @@ var (
 )
 
 func TestGetPVForPVC(t *testing.T) {
-	boundPVC := &v1.PersistentVolumeClaim{
+	boundPVC := &corev1api.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-csi-pvc",
 			Namespace: "default",
 		},
-		Spec: v1.PersistentVolumeClaimSpec{
-			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
-			Resources: v1.VolumeResourceRequirements{
-				Requests: v1.ResourceList{},
+		Spec: corev1api.PersistentVolumeClaimSpec{
+			AccessModes: []corev1api.PersistentVolumeAccessMode{corev1api.ReadWriteOnce},
+			Resources: corev1api.VolumeResourceRequirements{
+				Requests: corev1api.ResourceList{},
 			},
 			StorageClassName: &csiStorageClass,
 			VolumeName:       "test-csi-7d28e566-ade7-4ed6-9e15-2e44d2fbcc08",
 		},
-		Status: v1.PersistentVolumeClaimStatus{
-			Phase:       v1.ClaimBound,
-			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
-			Capacity:    v1.ResourceList{},
+		Status: corev1api.PersistentVolumeClaimStatus{
+			Phase:       corev1api.ClaimBound,
+			AccessModes: []corev1api.PersistentVolumeAccessMode{corev1api.ReadWriteOnce},
+			Capacity:    corev1api.ResourceList{},
 		},
 	}
-	matchingPV := &v1.PersistentVolume{
+	matchingPV := &corev1api.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-csi-7d28e566-ade7-4ed6-9e15-2e44d2fbcc08",
 		},
-		Spec: v1.PersistentVolumeSpec{
-			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
-			Capacity:    v1.ResourceList{},
-			ClaimRef: &v1.ObjectReference{
+		Spec: corev1api.PersistentVolumeSpec{
+			AccessModes: []corev1api.PersistentVolumeAccessMode{corev1api.ReadWriteOnce},
+			Capacity:    corev1api.ResourceList{},
+			ClaimRef: &corev1api.ObjectReference{
 				Kind:            "PersistentVolumeClaim",
 				Name:            "test-csi-pvc",
 				Namespace:       "default",
 				ResourceVersion: "1027",
 				UID:             "7d28e566-ade7-4ed6-9e15-2e44d2fbcc08",
 			},
-			PersistentVolumeSource: v1.PersistentVolumeSource{
-				CSI: &v1.CSIPersistentVolumeSource{
+			PersistentVolumeSource: corev1api.PersistentVolumeSource{
+				CSI: &corev1api.CSIPersistentVolumeSource{
 					Driver: "hostpath.csi.k8s.io",
 					FSType: "ext4",
 					VolumeAttributes: map[string]string{
@@ -1169,54 +1170,54 @@ func TestGetPVForPVC(t *testing.T) {
 					VolumeHandle: "e61f2b48-527a-11ea-b54f-cab6317018f1",
 				},
 			},
-			PersistentVolumeReclaimPolicy: v1.PersistentVolumeReclaimDelete,
+			PersistentVolumeReclaimPolicy: corev1api.PersistentVolumeReclaimDelete,
 			StorageClassName:              csiStorageClass,
 		},
-		Status: v1.PersistentVolumeStatus{
-			Phase: v1.VolumeBound,
+		Status: corev1api.PersistentVolumeStatus{
+			Phase: corev1api.VolumeBound,
 		},
 	}
 
-	pvcWithNoVolumeName := &v1.PersistentVolumeClaim{
+	pvcWithNoVolumeName := &corev1api.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "no-vol-pvc",
 			Namespace: "default",
 		},
-		Spec: v1.PersistentVolumeClaimSpec{
-			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
-			Resources: v1.VolumeResourceRequirements{
-				Requests: v1.ResourceList{},
+		Spec: corev1api.PersistentVolumeClaimSpec{
+			AccessModes: []corev1api.PersistentVolumeAccessMode{corev1api.ReadWriteOnce},
+			Resources: corev1api.VolumeResourceRequirements{
+				Requests: corev1api.ResourceList{},
 			},
 			StorageClassName: &csiStorageClass,
 		},
-		Status: v1.PersistentVolumeClaimStatus{},
+		Status: corev1api.PersistentVolumeClaimStatus{},
 	}
 
-	unboundPVC := &v1.PersistentVolumeClaim{
+	unboundPVC := &corev1api.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "unbound-pvc",
 			Namespace: "default",
 		},
-		Spec: v1.PersistentVolumeClaimSpec{
-			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
-			Resources: v1.VolumeResourceRequirements{
-				Requests: v1.ResourceList{},
+		Spec: corev1api.PersistentVolumeClaimSpec{
+			AccessModes: []corev1api.PersistentVolumeAccessMode{corev1api.ReadWriteOnce},
+			Resources: corev1api.VolumeResourceRequirements{
+				Requests: corev1api.ResourceList{},
 			},
 			StorageClassName: &csiStorageClass,
 			VolumeName:       "test-csi-7d28e566-ade7-4ed6-9e15-2e44d2fbcc08",
 		},
-		Status: v1.PersistentVolumeClaimStatus{
-			Phase:       v1.ClaimPending,
-			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
-			Capacity:    v1.ResourceList{},
+		Status: corev1api.PersistentVolumeClaimStatus{
+			Phase:       corev1api.ClaimPending,
+			AccessModes: []corev1api.PersistentVolumeAccessMode{corev1api.ReadWriteOnce},
+			Capacity:    corev1api.ResourceList{},
 		},
 	}
 
 	testCases := []struct {
 		name        string
-		inPVC       *v1.PersistentVolumeClaim
+		inPVC       *corev1api.PersistentVolumeClaim
 		expectError bool
-		expectedPV  *v1.PersistentVolume
+		expectedPV  *corev1api.PersistentVolume
 	}{
 		{
 			name:        "should find PV matching the PVC",
@@ -1246,12 +1247,12 @@ func TestGetPVForPVC(t *testing.T) {
 			actualPV, actualError := GetPVForPVC(tc.inPVC, fakeClient)
 
 			if tc.expectError {
-				assert.NotNil(t, actualError, "Want error; Got nil error")
+				assert.Error(t, actualError, "Want error; Got nil error")
 				assert.Nilf(t, actualPV, "Want PV: nil; Got PV: %q", actualPV)
 				return
 			}
 
-			assert.Nilf(t, actualError, "Want: nil error; Got: %v", actualError)
+			assert.NoErrorf(t, actualError, "Want: nil error; Got: %v", actualError)
 			assert.Equalf(t, actualPV.Name, tc.expectedPV.Name, "Want PV with name %q; Got PV with name %q", tc.expectedPV.Name, actualPV.Name)
 		})
 	}
@@ -1318,18 +1319,18 @@ func TestGetPVCForPodVolume(t *testing.T) {
 			Name:      "sample-pvc",
 			Namespace: "sample-ns",
 		},
-		Spec: v1.PersistentVolumeClaimSpec{
-			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
-			Resources: v1.VolumeResourceRequirements{
-				Requests: v1.ResourceList{},
+		Spec: corev1api.PersistentVolumeClaimSpec{
+			AccessModes: []corev1api.PersistentVolumeAccessMode{corev1api.ReadWriteOnce},
+			Resources: corev1api.VolumeResourceRequirements{
+				Requests: corev1api.ResourceList{},
 			},
 			StorageClassName: &csiStorageClass,
 			VolumeName:       "test-csi-7d28e566-ade7-4ed6-9e15-2e44d2fbcc08",
 		},
-		Status: v1.PersistentVolumeClaimStatus{
-			Phase:       v1.ClaimBound,
-			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
-			Capacity:    v1.ResourceList{},
+		Status: corev1api.PersistentVolumeClaimStatus{
+			Phase:       corev1api.ClaimBound,
+			AccessModes: []corev1api.PersistentVolumeAccessMode{corev1api.ReadWriteOnce},
+			Capacity:    corev1api.ResourceList{},
 		},
 	}
 
@@ -1369,12 +1370,158 @@ func TestGetPVCForPodVolume(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			actualPVC, actualError := GetPVCForPodVolume(tc.vol, samplePod, fakeClient)
 			if tc.expectedError {
-				assert.NotNil(t, actualError, "Want error; Got nil error")
+				assert.Error(t, actualError, "Want error; Got nil error")
 				assert.Nilf(t, actualPVC, "Want PV: nil; Got PV: %q", actualPVC)
 				return
 			}
-			assert.Nilf(t, actualError, "Want: nil error; Got: %v", actualError)
+			assert.NoErrorf(t, actualError, "Want: nil error; Got: %v", actualError)
 			assert.Equalf(t, actualPVC.Name, tc.expectedPVC.Name, "Want PVC with name %q; Got PVC with name %q", tc.expectedPVC.Name, actualPVC)
+		})
+	}
+}
+
+func TestMakePodPVCAttachment(t *testing.T) {
+	testCases := []struct {
+		name                 string
+		volumeName           string
+		volumeMode           corev1api.PersistentVolumeMode
+		readOnly             bool
+		expectedVolumeMount  []corev1api.VolumeMount
+		expectedVolumeDevice []corev1api.VolumeDevice
+		expectedVolumePath   string
+	}{
+		{
+			name:       "no volume mode specified",
+			volumeName: "volume-1",
+			readOnly:   true,
+			expectedVolumeMount: []corev1api.VolumeMount{
+				{
+					Name:      "volume-1",
+					MountPath: "/volume-1",
+					ReadOnly:  true,
+				},
+			},
+			expectedVolumePath: "/volume-1",
+		},
+		{
+			name:       "fs mode specified",
+			volumeName: "volume-2",
+			volumeMode: corev1api.PersistentVolumeFilesystem,
+			readOnly:   true,
+			expectedVolumeMount: []corev1api.VolumeMount{
+				{
+					Name:      "volume-2",
+					MountPath: "/volume-2",
+					ReadOnly:  true,
+				},
+			},
+			expectedVolumePath: "/volume-2",
+		},
+		{
+			name:       "block volume mode specified",
+			volumeName: "volume-3",
+			volumeMode: corev1api.PersistentVolumeBlock,
+			expectedVolumeDevice: []corev1api.VolumeDevice{
+				{
+					Name:       "volume-3",
+					DevicePath: "/volume-3",
+				},
+			},
+			expectedVolumePath: "/volume-3",
+		},
+		{
+			name:       "fs mode specified with readOnly as false",
+			volumeName: "volume-4",
+			readOnly:   false,
+			volumeMode: corev1api.PersistentVolumeFilesystem,
+			expectedVolumeMount: []corev1api.VolumeMount{
+				{
+					Name:      "volume-4",
+					MountPath: "/volume-4",
+					ReadOnly:  false,
+				},
+			},
+			expectedVolumePath: "/volume-4",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var volMode *corev1api.PersistentVolumeMode
+			if tc.volumeMode != "" {
+				volMode = &tc.volumeMode
+			}
+
+			mount, device, path := MakePodPVCAttachment(tc.volumeName, volMode, tc.readOnly)
+
+			assert.Equal(t, tc.expectedVolumeMount, mount)
+			assert.Equal(t, tc.expectedVolumeDevice, device)
+			assert.Equal(t, tc.expectedVolumePath, path)
+			if tc.expectedVolumeMount != nil {
+				assert.Equal(t, tc.expectedVolumeMount[0].ReadOnly, tc.readOnly)
+			}
+		})
+	}
+}
+
+func TestDiagnosePVC(t *testing.T) {
+	testCases := []struct {
+		name     string
+		pvc      *corev1api.PersistentVolumeClaim
+		expected string
+	}{
+		{
+			name: "pvc with all info",
+			pvc: &corev1api.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "fake-pvc",
+					Namespace: "fake-ns",
+				},
+				Spec: corev1api.PersistentVolumeClaimSpec{
+					VolumeName: "fake-pv",
+				},
+				Status: corev1api.PersistentVolumeClaimStatus{
+					Phase: corev1api.ClaimPending,
+				},
+			},
+			expected: "PVC fake-ns/fake-pvc, phase Pending, binding to fake-pv\n",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			diag := DiagnosePVC(tc.pvc)
+			assert.Equal(t, tc.expected, diag)
+		})
+	}
+}
+
+func TestDiagnosePV(t *testing.T) {
+	testCases := []struct {
+		name     string
+		pv       *corev1api.PersistentVolume
+		expected string
+	}{
+		{
+			name: "pv with all info",
+			pv: &corev1api.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "fake-pv",
+				},
+				Status: corev1api.PersistentVolumeStatus{
+					Phase:   corev1api.VolumePending,
+					Message: "fake-message",
+					Reason:  "fake-reason",
+				},
+			},
+			expected: "PV fake-pv, phase Pending, reason fake-reason, message fake-message\n",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			diag := DiagnosePV(tc.pv)
+			assert.Equal(t, tc.expected, diag)
 		})
 	}
 }

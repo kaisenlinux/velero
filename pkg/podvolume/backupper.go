@@ -35,7 +35,9 @@ import (
 	veleroclient "github.com/vmware-tanzu/velero/pkg/client"
 	"github.com/vmware-tanzu/velero/pkg/label"
 	"github.com/vmware-tanzu/velero/pkg/nodeagent"
+	"github.com/vmware-tanzu/velero/pkg/podvolume/configs"
 	"github.com/vmware-tanzu/velero/pkg/repository"
+	"github.com/vmware-tanzu/velero/pkg/uploader"
 	uploaderutil "github.com/vmware-tanzu/velero/pkg/uploader/util"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	"github.com/vmware-tanzu/velero/pkg/util/kube"
@@ -163,10 +165,13 @@ func (b *backupper) getMatchAction(resPolicies *resourcepolicies.Policies, pvc *
 	return nil, errors.Errorf("failed to check resource policies for empty volume")
 }
 
+var funcGetRepositoryType = getRepositoryType
+
 func (b *backupper) BackupPodVolumes(backup *velerov1api.Backup, pod *corev1api.Pod, volumesToBackup []string, resPolicies *resourcepolicies.Policies, log logrus.FieldLogger) ([]*velerov1api.PodVolumeBackup, *PVCBackupSummary, []error) {
 	if len(volumesToBackup) == 0 {
 		return nil, nil, nil
 	}
+
 	log.Infof("pod %s/%s has volumes to backup: %v", pod.Namespace, pod.Name, volumesToBackup)
 
 	var (
@@ -189,6 +194,13 @@ func (b *backupper) BackupPodVolumes(backup *velerov1api.Backup, pod *corev1api.
 		}
 	}
 
+	if msg, err := uploader.ValidateUploaderType(b.uploaderType); err != nil {
+		skipAllPodVolumes(pod, volumesToBackup, err, pvcSummary, log)
+		return nil, pvcSummary, []error{err}
+	} else if msg != "" {
+		log.Warn(msg)
+	}
+
 	if err := kube.IsPodRunning(pod); err != nil {
 		skipAllPodVolumes(pod, volumesToBackup, err, pvcSummary, log)
 		return nil, pvcSummary, nil
@@ -196,18 +208,21 @@ func (b *backupper) BackupPodVolumes(backup *velerov1api.Backup, pod *corev1api.
 
 	err := nodeagent.IsRunningInNode(b.ctx, backup.Namespace, pod.Spec.NodeName, b.crClient)
 	if err != nil {
-		return nil, nil, []error{err}
+		skipAllPodVolumes(pod, volumesToBackup, err, pvcSummary, log)
+		return nil, pvcSummary, []error{err}
 	}
 
-	repositoryType := getRepositoryType(b.uploaderType)
+	repositoryType := funcGetRepositoryType(b.uploaderType)
 	if repositoryType == "" {
 		err := errors.Errorf("empty repository type, uploader %s", b.uploaderType)
-		return nil, nil, []error{err}
+		skipAllPodVolumes(pod, volumesToBackup, err, pvcSummary, log)
+		return nil, pvcSummary, []error{err}
 	}
 
 	repo, err := b.repoEnsurer.EnsureRepo(b.ctx, backup.Namespace, pod.Namespace, backup.Spec.StorageLocation, repositoryType)
 	if err != nil {
-		return nil, nil, []error{err}
+		skipAllPodVolumes(pod, volumesToBackup, err, pvcSummary, log)
+		return nil, pvcSummary, []error{err}
 	}
 
 	// get a single non-exclusive lock since we'll wait for all individual
@@ -405,7 +420,7 @@ func newPodVolumeBackup(backup *velerov1api.Backup, pod *corev1api.Pod, volume c
 		// this annotation is used in pkg/restore to identify if a PVC
 		// has a pod volume backup.
 		pvb.Annotations = map[string]string{
-			PVCNameAnnotation: pvc.Name,
+			configs.PVCNameAnnotation: pvc.Name,
 		}
 
 		// this label is used by the pod volume backup controller to tell

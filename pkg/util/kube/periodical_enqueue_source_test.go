@@ -37,21 +37,21 @@ import (
 )
 
 func TestStart(t *testing.T) {
-	require.Nil(t, velerov1.AddToScheme(scheme.Scheme))
+	require.NoError(t, velerov1.AddToScheme(scheme.Scheme))
 
 	ctx, cancelFunc := context.WithCancel(context.TODO())
 	client := (&fake.ClientBuilder{}).Build()
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter())
-	source := NewPeriodicalEnqueueSource(logrus.WithContext(ctx), client, &velerov1.ScheduleList{}, 1*time.Second, PeriodicalEnqueueSourceOption{})
+	source := NewPeriodicalEnqueueSource(logrus.WithContext(ctx).WithField("controller", "PES_TEST"), client, &velerov1.ScheduleList{}, 1*time.Second, PeriodicalEnqueueSourceOption{})
 
-	require.Nil(t, source.Start(ctx, nil, queue))
+	require.NoError(t, source.Start(ctx, nil, queue))
 
 	// no resources
 	time.Sleep(1 * time.Second)
 	require.Equal(t, 0, queue.Len())
 
 	// contain one resource
-	require.Nil(t, client.Create(ctx, &velerov1.Schedule{
+	require.NoError(t, client.Create(ctx, &velerov1.Schedule{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "schedule",
 		},
@@ -69,27 +69,27 @@ func TestStart(t *testing.T) {
 }
 
 func TestPredicate(t *testing.T) {
-	require.Nil(t, velerov1.AddToScheme(scheme.Scheme))
+	require.NoError(t, velerov1.AddToScheme(scheme.Scheme))
 
 	ctx, cancelFunc := context.WithCancel(context.TODO())
 	client := (&fake.ClientBuilder{}).Build()
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter())
 	source := NewPeriodicalEnqueueSource(
-		logrus.WithContext(ctx),
+		logrus.WithContext(ctx).WithField("controller", "PES_TEST"),
 		client,
 		&velerov1.BackupStorageLocationList{},
 		1*time.Second,
 		PeriodicalEnqueueSourceOption{},
 	)
 
-	require.Nil(t, source.Start(ctx, nil, queue, NewGenericEventPredicate(func(object crclient.Object) bool {
+	require.NoError(t, source.Start(ctx, nil, queue, NewGenericEventPredicate(func(object crclient.Object) bool {
 		location := object.(*velerov1.BackupStorageLocation)
 		return storage.IsReadyToValidate(location.Spec.ValidationFrequency, location.Status.LastValidationTime, 1*time.Minute, logrus.WithContext(ctx).WithField("BackupStorageLocation", location.Name))
 	})))
 
 	// Should not patch a backup storage location object status phase
 	// if the location's validation frequency is specifically set to zero
-	require.Nil(t, client.Create(ctx, &velerov1.BackupStorageLocation{
+	require.NoError(t, client.Create(ctx, &velerov1.BackupStorageLocation{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "location1",
 			Namespace: "default",
@@ -109,13 +109,13 @@ func TestPredicate(t *testing.T) {
 }
 
 func TestOrder(t *testing.T) {
-	require.Nil(t, velerov1.AddToScheme(scheme.Scheme))
+	require.NoError(t, velerov1.AddToScheme(scheme.Scheme))
 
 	ctx, cancelFunc := context.WithCancel(context.TODO())
 	client := (&fake.ClientBuilder{}).Build()
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter())
 	source := NewPeriodicalEnqueueSource(
-		logrus.WithContext(ctx),
+		logrus.WithContext(ctx).WithField("controller", "PES_TEST"),
 		client,
 		&velerov1.BackupStorageLocationList{},
 		1*time.Second,
@@ -137,11 +137,11 @@ func TestOrder(t *testing.T) {
 		},
 	)
 
-	require.Nil(t, source.Start(ctx, nil, queue))
+	require.NoError(t, source.Start(ctx, nil, queue))
 
 	// Should not patch a backup storage location object status phase
 	// if the location's validation frequency is specifically set to zero
-	require.Nil(t, client.Create(ctx, &velerov1.BackupStorageLocation{
+	require.NoError(t, client.Create(ctx, &velerov1.BackupStorageLocation{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "location1",
 			Namespace: "default",
@@ -153,7 +153,7 @@ func TestOrder(t *testing.T) {
 			LastValidationTime: &metav1.Time{Time: time.Now()},
 		},
 	}))
-	require.Nil(t, client.Create(ctx, &velerov1.BackupStorageLocation{
+	require.NoError(t, client.Create(ctx, &velerov1.BackupStorageLocation{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "location2",
 			Namespace: "default",
@@ -171,8 +171,8 @@ func TestOrder(t *testing.T) {
 	first, _ := queue.Get()
 	bsl := &velerov1.BackupStorageLocation{}
 	require.Equal(t, "location2", first.(reconcile.Request).Name)
-	require.Nil(t, client.Get(ctx, first.(reconcile.Request).NamespacedName, bsl))
-	require.Equal(t, true, bsl.Spec.Default)
+	require.NoError(t, client.Get(ctx, first.(reconcile.Request).NamespacedName, bsl))
+	require.True(t, bsl.Spec.Default)
 
 	cancelFunc()
 }

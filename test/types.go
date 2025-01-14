@@ -22,12 +22,15 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vmware-tanzu/velero/pkg/cmd/cli/install"
-	. "github.com/vmware-tanzu/velero/test/util/k8s"
+	"github.com/vmware-tanzu/velero/test/util/k8s"
 )
 
+// e2e-storage-class is the default StorageClass for E2E.
 const StorageClassName = "e2e-storage-class"
+
+// e2e-storage-class-2 is used for the StorageClass mapping test case.
 const StorageClassName2 = "e2e-storage-class-2"
-const CSIStorageClassName = "e2e-csi-storage-class"
+
 const FeatureCSI = "EnableCSI"
 const VanillaZFS = "vanilla-zfs"
 const Kind = "kind"
@@ -35,12 +38,22 @@ const Azure = "azure"
 const AzureCSI = "azure-csi"
 const AwsCSI = "aws-csi"
 const AWS = "aws"
-const Gcp = "gcp"
+const GCP = "gcp"
 const Vsphere = "vsphere"
+const CSI = "csi"
+const Velero = "velero"
+const VeleroRestoreHelper = "velero-restore-helper"
 
 const UploaderTypeRestic = "restic"
 
-var PublicCloudProviders = []string{AWS, Azure, Gcp, Vsphere}
+const (
+	KubeSystemNamespace           = "kube-system"
+	VSphereCSIControllerNamespace = "vmware-system-csi"
+	VeleroVSphereSecretName       = "velero-vsphere-config-secret"
+	VeleroVSphereConfigMapName    = "velero-vsphere-plugin-config"
+)
+
+var PublicCloudProviders = []string{AWS, Azure, GCP, Vsphere}
 var LocalCloudProviders = []string{Kind, VanillaZFS}
 var CloudProviders = append(PublicCloudProviders, LocalCloudProviders...)
 
@@ -49,12 +62,12 @@ var UUIDgen uuid.UUID
 
 var VeleroCfg VeleroConfig
 
-type Report struct {
+type E2EReport struct {
 	TestDescription string                 `yaml:"Test Description"`
 	OtherFields     map[string]interface{} `yaml:",inline"`
 }
 
-var ReportData *Report
+var ReportData *E2EReport
 
 type VeleroConfig struct {
 	VeleroCfgInPerf
@@ -84,13 +97,12 @@ type VeleroConfig struct {
 	Plugins                           string
 	AddBSLPlugins                     string
 	KibishiiDirectory                 string
-	Debug                             bool
 	GCFrequency                       string
 	DefaultClusterContext             string
 	StandbyClusterContext             string
-	ClientToInstallVelero             *TestClient
-	DefaultClient                     *TestClient
-	StandbyClient                     *TestClient
+	ClientToInstallVelero             *k8s.TestClient
+	DefaultClient                     *k8s.TestClient
+	StandbyClient                     *k8s.TestClient
 	ClusterToInstallVelero            string
 	DefaultClusterName                string
 	StandbyClusterName                string
@@ -110,6 +122,8 @@ type VeleroConfig struct {
 	StandbyCLSServiceAccountName      string
 	ServiceAccountNameToInstall       string
 	EKSPolicyARN                      string
+	FailFast                          bool
+	HasVspherePlugin                  bool
 }
 
 type VeleroCfgInPerf struct {

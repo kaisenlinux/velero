@@ -27,7 +27,7 @@ import (
 
 	"github.com/vmware-tanzu/velero/internal/velero"
 	"github.com/vmware-tanzu/velero/pkg/builder"
-	"github.com/vmware-tanzu/velero/pkg/repository"
+	"github.com/vmware-tanzu/velero/pkg/util/kube"
 )
 
 type podTemplateOption func(*podTemplateConfig)
@@ -52,7 +52,11 @@ type podTemplateConfig struct {
 	privilegedNodeAgent             bool
 	disableInformerCache            bool
 	scheduleSkipImmediately         bool
-	maintenanceConfig               repository.MaintenanceConfig
+	podResources                    kube.PodResources
+	keepLatestMaintenanceJobs       int
+	backupRepoConfigMap             string
+	repoMaintenanceJobConfigMap     string
+	nodeAgentConfigMap              string
 }
 
 func WithImage(image string) podTemplateOption {
@@ -95,9 +99,9 @@ func WithSecret(secretPresent bool) podTemplateOption {
 	}
 }
 
-func WithRestoreOnly() podTemplateOption {
+func WithRestoreOnly(b bool) podTemplateOption {
 	return func(c *podTemplateConfig) {
-		c.restoreOnly = true
+		c.restoreOnly = b
 	}
 }
 
@@ -143,21 +147,21 @@ func WithUploaderType(t string) podTemplateOption {
 	}
 }
 
-func WithDefaultVolumesToFsBackup() podTemplateOption {
+func WithDefaultVolumesToFsBackup(b bool) podTemplateOption {
 	return func(c *podTemplateConfig) {
-		c.defaultVolumesToFsBackup = true
+		c.defaultVolumesToFsBackup = b
 	}
 }
 
-func WithDefaultSnapshotMoveData() podTemplateOption {
+func WithDefaultSnapshotMoveData(b bool) podTemplateOption {
 	return func(c *podTemplateConfig) {
-		c.defaultSnapshotMoveData = true
+		c.defaultSnapshotMoveData = b
 	}
 }
 
-func WithDisableInformerCache() podTemplateOption {
+func WithDisableInformerCache(b bool) podTemplateOption {
 	return func(c *podTemplateConfig) {
-		c.disableInformerCache = true
+		c.disableInformerCache = b
 	}
 }
 
@@ -167,9 +171,15 @@ func WithServiceAccountName(sa string) podTemplateOption {
 	}
 }
 
-func WithPrivilegedNodeAgent() podTemplateOption {
+func WithPrivilegedNodeAgent(b bool) podTemplateOption {
 	return func(c *podTemplateConfig) {
-		c.privilegedNodeAgent = true
+		c.privilegedNodeAgent = b
+	}
+}
+
+func WithNodeAgentConfigMap(nodeAgentConfigMap string) podTemplateOption {
+	return func(c *podTemplateConfig) {
+		c.nodeAgentConfigMap = nodeAgentConfigMap
 	}
 }
 
@@ -179,9 +189,26 @@ func WithScheduleSkipImmediately(b bool) podTemplateOption {
 	}
 }
 
-func WithMaintenanceConfig(config repository.MaintenanceConfig) podTemplateOption {
+func WithPodResources(podResources kube.PodResources) podTemplateOption {
 	return func(c *podTemplateConfig) {
-		c.maintenanceConfig = config
+		c.podResources = podResources
+	}
+}
+
+func WithKeepLatestMaintenanceJobs(keepLatestMaintenanceJobs int) podTemplateOption {
+	return func(c *podTemplateConfig) {
+		c.keepLatestMaintenanceJobs = keepLatestMaintenanceJobs
+	}
+}
+
+func WithBackupRepoConfigMap(backupRepoConfigMap string) podTemplateOption {
+	return func(c *podTemplateConfig) {
+		c.backupRepoConfigMap = backupRepoConfigMap
+	}
+}
+func WithRepoMaintenanceJobConfigMap(repoMaintenanceJobConfigMap string) podTemplateOption {
+	return func(c *podTemplateConfig) {
+		c.repoMaintenanceJobConfigMap = repoMaintenanceJobConfigMap
 	}
 }
 
@@ -242,24 +269,32 @@ func Deployment(namespace string, opts ...podTemplateOption) *appsv1.Deployment 
 		args = append(args, fmt.Sprintf("--fs-backup-timeout=%v", c.podVolumeOperationTimeout))
 	}
 
-	if c.maintenanceConfig.KeepLatestMaitenanceJobs > 0 {
-		args = append(args, fmt.Sprintf("--keep-latest-maintenance-jobs=%d", c.maintenanceConfig.KeepLatestMaitenanceJobs))
+	if c.keepLatestMaintenanceJobs > 0 {
+		args = append(args, fmt.Sprintf("--keep-latest-maintenance-jobs=%d", c.keepLatestMaintenanceJobs))
 	}
 
-	if c.maintenanceConfig.CPULimit != "" {
-		args = append(args, fmt.Sprintf("--maintenance-job-cpu-limit=%s", c.maintenanceConfig.CPULimit))
+	if len(c.podResources.CPULimit) > 0 {
+		args = append(args, fmt.Sprintf("--maintenance-job-cpu-limit=%s", c.podResources.CPULimit))
 	}
 
-	if c.maintenanceConfig.CPURequest != "" {
-		args = append(args, fmt.Sprintf("--maintenance-job-cpu-request=%s", c.maintenanceConfig.CPURequest))
+	if len(c.podResources.CPURequest) > 0 {
+		args = append(args, fmt.Sprintf("--maintenance-job-cpu-request=%s", c.podResources.CPURequest))
 	}
 
-	if c.maintenanceConfig.MemLimit != "" {
-		args = append(args, fmt.Sprintf("--maintenance-job-mem-limit=%s", c.maintenanceConfig.MemLimit))
+	if len(c.podResources.MemoryLimit) > 0 {
+		args = append(args, fmt.Sprintf("--maintenance-job-mem-limit=%s", c.podResources.MemoryLimit))
 	}
 
-	if c.maintenanceConfig.MemRequest != "" {
-		args = append(args, fmt.Sprintf("--maintenance-job-mem-request=%s", c.maintenanceConfig.MemRequest))
+	if len(c.podResources.MemoryRequest) > 0 {
+		args = append(args, fmt.Sprintf("--maintenance-job-mem-request=%s", c.podResources.MemoryRequest))
+	}
+
+	if len(c.backupRepoConfigMap) > 0 {
+		args = append(args, fmt.Sprintf("--backup-repository-configmap=%s", c.backupRepoConfigMap))
+	}
+
+	if len(c.repoMaintenanceJobConfigMap) > 0 {
+		args = append(args, fmt.Sprintf("--repo-maintenance-job-configmap=%s", c.repoMaintenanceJobConfigMap))
 	}
 
 	deployment := &appsv1.Deployment{

@@ -34,12 +34,12 @@ import (
 
 const (
 	// daemonSet is the name of the Velero node agent daemonset.
-	daemonSet  = "node-agent"
-	configName = "node-agent-config"
+	daemonSet = "node-agent"
 )
 
 var (
-	ErrDaemonSetNotFound = errors.New("daemonset not found")
+	ErrDaemonSetNotFound      = errors.New("daemonset not found")
+	ErrNodeAgentLabelNotFound = errors.New("node-agent label not found")
 )
 
 type LoadConcurrency struct {
@@ -63,12 +63,30 @@ type RuledConfigs struct {
 	Number int `json:"number"`
 }
 
+type BackupPVC struct {
+	// StorageClass is the name of storage class to be used by the backupPVC
+	StorageClass string `json:"storageClass,omitempty"`
+
+	// ReadOnly sets the backupPVC's access mode as read only
+	ReadOnly bool `json:"readOnly,omitempty"`
+
+	// SPCNoRelabeling sets Spec.SecurityContext.SELinux.Type to "spc_t" for the pod mounting the backupPVC
+	// ignored if ReadOnly is false
+	SPCNoRelabeling bool `json:"spcNoRelabeling,omitempty"`
+}
+
 type Configs struct {
 	// LoadConcurrency is the config for data path load concurrency per node.
 	LoadConcurrency *LoadConcurrency `json:"loadConcurrency,omitempty"`
 
 	// LoadAffinity is the config for data path load affinity.
-	LoadAffinity []*LoadAffinity `json:"loadAffinity,omitempty"`
+	LoadAffinity []*kube.LoadAffinity `json:"loadAffinity,omitempty"`
+
+	// BackupPVCConfig is the config for backupPVC (intermediate PVC) of snapshot data movement
+	BackupPVCConfig map[string]BackupPVC `json:"backupPVC,omitempty"`
+
+	// PodResources is the resource config for various types of pods launched by node-agent, i.e., data mover pods.
+	PodResources *kube.PodResources `json:"podResources,omitempty"`
 }
 
 // IsRunning checks if the node agent daemonset is running properly. If not, return the error found
@@ -82,8 +100,17 @@ func IsRunning(ctx context.Context, kubeClient kubernetes.Interface, namespace s
 	}
 }
 
-// IsRunningInNode checks if the node agent pod is running properly in a specified node. If not, return the error found
+// KbClientIsRunningInNode checks if the node agent pod is running properly in a specified node through kube client. If not, return the error found
+func KbClientIsRunningInNode(ctx context.Context, namespace string, nodeName string, kubeClient kubernetes.Interface) error {
+	return isRunningInNode(ctx, namespace, nodeName, nil, kubeClient)
+}
+
+// IsRunningInNode checks if the node agent pod is running properly in a specified node through controller client. If not, return the error found
 func IsRunningInNode(ctx context.Context, namespace string, nodeName string, crClient ctrlclient.Client) error {
+	return isRunningInNode(ctx, namespace, nodeName, crClient, nil)
+}
+
+func isRunningInNode(ctx context.Context, namespace string, nodeName string, crClient ctrlclient.Client, kubeClient kubernetes.Interface) error {
 	if nodeName == "" {
 		return errors.New("node name is empty")
 	}
@@ -94,7 +121,12 @@ func IsRunningInNode(ctx context.Context, namespace string, nodeName string, crC
 		return errors.Wrap(err, "fail to parse selector")
 	}
 
-	err = crClient.List(ctx, pods, &ctrlclient.ListOptions{LabelSelector: parsedSelector})
+	if crClient != nil {
+		err = crClient.List(ctx, pods, &ctrlclient.ListOptions{LabelSelector: parsedSelector})
+	} else {
+		pods, err = kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: parsedSelector.String()})
+	}
+
 	if err != nil {
 		return errors.Wrap(err, "failed to list daemonset pods")
 	}
@@ -121,14 +153,10 @@ func GetPodSpec(ctx context.Context, kubeClient kubernetes.Interface, namespace 
 	return &ds.Spec.Template.Spec, nil
 }
 
-func GetConfigs(ctx context.Context, namespace string, kubeClient kubernetes.Interface) (*Configs, error) {
+func GetConfigs(ctx context.Context, namespace string, kubeClient kubernetes.Interface, configName string) (*Configs, error) {
 	cm, err := kubeClient.CoreV1().ConfigMaps(namespace).Get(ctx, configName, metav1.GetOptions{})
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, nil
-		} else {
-			return nil, errors.Wrapf(err, "error to get node agent configs %s", configName)
-		}
+		return nil, errors.Wrapf(err, "error to get node agent configs %s", configName)
 	}
 
 	if cm.Data == nil {
@@ -147,4 +175,22 @@ func GetConfigs(ctx context.Context, namespace string, kubeClient kubernetes.Int
 	}
 
 	return configs, nil
+}
+
+func GetLabelValue(ctx context.Context, kubeClient kubernetes.Interface, namespace string, key string) (string, error) {
+	ds, err := kubeClient.AppsV1().DaemonSets(namespace).Get(ctx, daemonSet, metav1.GetOptions{})
+	if err != nil {
+		return "", errors.Wrap(err, "error getting node-agent daemonset")
+	}
+
+	if ds.Spec.Template.Labels == nil {
+		return "", ErrNodeAgentLabelNotFound
+	}
+
+	val, found := ds.Spec.Template.Labels[key]
+	if !found {
+		return "", ErrNodeAgentLabelNotFound
+	}
+
+	return val, nil
 }

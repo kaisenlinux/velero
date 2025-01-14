@@ -29,7 +29,6 @@ import (
 	"github.com/kopia/kopia/repo"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/vmware-tanzu/velero/internal/credentials"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
@@ -44,7 +43,6 @@ type unifiedRepoProvider struct {
 	workPath         string
 	repoService      udmrepo.BackupRepoService
 	repoBackend      string
-	cli              client.Client
 	log              logrus.FieldLogger
 }
 
@@ -55,7 +53,7 @@ var getGCPCredentials = repoconfig.GetGCPCredentials
 var getS3BucketRegion = repoconfig.GetAWSBucketRegion
 
 type localFuncTable struct {
-	getStorageVariables   func(*velerov1api.BackupStorageLocation, string, string) (map[string]string, error)
+	getStorageVariables   func(*velerov1api.BackupStorageLocation, string, string, map[string]string) (map[string]string, error)
 	getStorageCredentials func(*velerov1api.BackupStorageLocation, credentials.FileStore) (map[string]string, error)
 }
 
@@ -75,13 +73,11 @@ const (
 func NewUnifiedRepoProvider(
 	credentialGetter credentials.CredentialGetter,
 	repoBackend string,
-	cli client.Client,
 	log logrus.FieldLogger,
 ) Provider {
 	repo := unifiedRepoProvider{
 		credentialGetter: credentialGetter,
 		repoBackend:      repoBackend,
-		cli:              cli,
 		log:              log,
 	}
 
@@ -401,7 +397,7 @@ func (urp *unifiedRepoProvider) GetStoreOptions(param interface{}) (map[string]s
 		return map[string]string{}, errors.Errorf("invalid parameter, expect %T, actual %T", RepoParam{}, param)
 	}
 
-	storeVar, err := funcTable.getStorageVariables(repoParam.BackupLocation, urp.repoBackend, repoParam.BackupRepo.Spec.VolumeNamespace)
+	storeVar, err := funcTable.getStorageVariables(repoParam.BackupLocation, urp.repoBackend, repoParam.BackupRepo.Spec.VolumeNamespace, repoParam.BackupRepo.Spec.RepositoryConfig)
 	if err != nil {
 		return map[string]string{}, errors.Wrap(err, "error to get storage variables")
 	}
@@ -502,7 +498,7 @@ func getStorageCredentials(backupLocation *velerov1api.BackupStorageLocation, cr
 	return result, nil
 }
 
-func getStorageVariables(backupLocation *velerov1api.BackupStorageLocation, repoBackend string, repoName string) (map[string]string, error) {
+func getStorageVariables(backupLocation *velerov1api.BackupStorageLocation, repoBackend string, repoName string, backupRepoConfig map[string]string) (map[string]string, error) {
 	result := make(map[string]string)
 
 	backendType := repoconfig.GetBackendType(backupLocation.Spec.Provider, backupLocation.Spec.Config)
@@ -533,7 +529,7 @@ func getStorageVariables(backupLocation *velerov1api.BackupStorageLocation, repo
 		var err error
 		if s3URL == "" {
 			if region == "" {
-				region, err = getS3BucketRegion(bucket)
+				region, err = getS3BucketRegion(bucket, config)
 				if err != nil {
 					return map[string]string{}, errors.Wrap(err, "error get s3 bucket region")
 				}
@@ -571,6 +567,12 @@ func getStorageVariables(backupLocation *velerov1api.BackupStorageLocation, repo
 	}
 	result[udmrepo.StoreOptionOssRegion] = strings.Trim(region, "/")
 	result[udmrepo.StoreOptionFsPath] = config["fspath"]
+
+	if backupRepoConfig != nil {
+		if v, found := backupRepoConfig[udmrepo.StoreOptionCacheLimit]; found {
+			result[udmrepo.StoreOptionCacheLimit] = v
+		}
+	}
 
 	return result, nil
 }

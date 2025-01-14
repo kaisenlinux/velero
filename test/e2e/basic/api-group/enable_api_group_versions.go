@@ -28,7 +28,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/pkg/errors"
 	corev1api "k8s.io/api/core/v1"
@@ -53,7 +53,7 @@ type apiGropuVersionsTest struct {
 	want       map[string]map[string]string
 }
 
-func APIGropuVersionsTest() {
+func APIGroupVersionsTest() {
 	var (
 		group       string
 		err         error
@@ -79,7 +79,9 @@ func APIGropuVersionsTest() {
 	})
 
 	AfterEach(func() {
-		if !veleroCfg.Debug {
+		if CurrentSpecReport().Failed() && veleroCfg.FailFast {
+			fmt.Println("Test case failed and fail fast is enabled. Skip resource clean up.")
+		} else {
 			for i := 0; i < testCaseNum; i++ {
 				curResource := fmt.Sprintf("rockband%ds", i)
 				curGroup := fmt.Sprintf("%s.%d", group, i)
@@ -98,7 +100,7 @@ func APIGropuVersionsTest() {
 			})
 			if InstallVelero {
 				By("Uninstall Velero in api group version case", func() {
-					Expect(VeleroUninstall(ctx, veleroCfg.VeleroCLI, veleroCfg.VeleroNamespace)).NotTo(HaveOccurred())
+					Expect(VeleroUninstall(ctx, veleroCfg)).NotTo(HaveOccurred())
 				})
 			}
 		}

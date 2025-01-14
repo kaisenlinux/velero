@@ -128,7 +128,7 @@ func TestHandleHooksSkips(t *testing.T) {
 func TestHandleHooks(t *testing.T) {
 	tests := []struct {
 		name                  string
-		phase                 hookPhase
+		phase                 HookPhase
 		groupResource         string
 		item                  runtime.Unstructured
 		hooks                 []ResourceHook
@@ -500,7 +500,7 @@ func TestHandleHooks(t *testing.T) {
 }
 
 func TestGetPodExecHookFromAnnotations(t *testing.T) {
-	phases := []hookPhase{"", PhasePre, PhasePost}
+	phases := []HookPhase{"", PhasePre, PhasePost}
 	for _, phase := range phases {
 		tests := []struct {
 			name         string
@@ -1199,7 +1199,7 @@ func TestGroupRestoreExecHooks(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			actual, err := GroupRestoreExecHooks("restore1", tc.resourceRestoreHooks, tc.pod, velerotest.NewLogger(), hookTracker)
-			assert.Nil(t, err)
+			assert.NoError(t, err)
 			assert.Equal(t, tc.expected, actual)
 		})
 	}
@@ -1976,7 +1976,7 @@ func TestValidateContainer(t *testing.T) {
 	expectedError := fmt.Errorf("invalid InitContainer in restore hook, it doesn't have Command, Name or Image field")
 
 	// valid string should return nil as result.
-	assert.Nil(t, ValidateContainer([]byte(valid)))
+	assert.NoError(t, ValidateContainer([]byte(valid)))
 
 	// noName string should return expected error as result.
 	assert.Equal(t, expectedError, ValidateContainer([]byte(noName)))
@@ -1999,7 +1999,7 @@ func TestBackupHookTracker(t *testing.T) {
 	}
 	test1 := []struct {
 		name                  string
-		phase                 hookPhase
+		phase                 HookPhase
 		groupResource         string
 		pods                  []podWithHook
 		hookTracker           *HookTracker

@@ -23,7 +23,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vmware-tanzu/velero/pkg/repository"
 	"github.com/vmware-tanzu/velero/pkg/uploader"
 
 	"github.com/pkg/errors"
@@ -43,33 +42,31 @@ import (
 
 // Options collects all the options for installing Velero into a Kubernetes cluster.
 type Options struct {
-	Namespace                 string
-	Image                     string
-	BucketName                string
-	Prefix                    string
-	ProviderName              string
-	PodAnnotations            flag.Map
-	PodLabels                 flag.Map
-	ServiceAccountAnnotations flag.Map
-	ServiceAccountName        string
-	VeleroPodCPURequest       string
-	VeleroPodMemRequest       string
-	VeleroPodCPULimit         string
-	VeleroPodMemLimit         string
-	NodeAgentPodCPURequest    string
-	NodeAgentPodMemRequest    string
-	NodeAgentPodCPULimit      string
-	NodeAgentPodMemLimit      string
-	RestoreOnly               bool
-	SecretFile                string
-	NoSecret                  bool
-	DryRun                    bool
-	BackupStorageConfig       flag.Map
-	VolumeSnapshotConfig      flag.Map
-	UseNodeAgent              bool
-	PrivilegedNodeAgent       bool
-	//TODO remove UseRestic when migration test out of using it
-	UseRestic                       bool
+	Namespace                       string
+	Image                           string
+	BucketName                      string
+	Prefix                          string
+	ProviderName                    string
+	PodAnnotations                  flag.Map
+	PodLabels                       flag.Map
+	ServiceAccountAnnotations       flag.Map
+	ServiceAccountName              string
+	VeleroPodCPURequest             string
+	VeleroPodMemRequest             string
+	VeleroPodCPULimit               string
+	VeleroPodMemLimit               string
+	NodeAgentPodCPURequest          string
+	NodeAgentPodMemRequest          string
+	NodeAgentPodCPULimit            string
+	NodeAgentPodMemLimit            string
+	RestoreOnly                     bool
+	SecretFile                      string
+	NoSecret                        bool
+	DryRun                          bool
+	BackupStorageConfig             flag.Map
+	VolumeSnapshotConfig            flag.Map
+	UseNodeAgent                    bool
+	PrivilegedNodeAgent             bool
 	Wait                            bool
 	UseVolumeSnapshots              bool
 	DefaultRepoMaintenanceFrequency time.Duration
@@ -85,7 +82,11 @@ type Options struct {
 	DefaultSnapshotMoveData         bool
 	DisableInformerCache            bool
 	ScheduleSkipImmediately         bool
-	MaintenanceCfg                  repository.MaintenanceConfig
+	PodResources                    kubeutil.PodResources
+	KeepLatestMaintenanceJobs       int
+	BackupRepoConfigMap             string
+	RepoMaintenanceJobConfigMap     string
+	NodeAgentConfigMap              string
 }
 
 // BindFlags adds command line values to the options struct.
@@ -130,11 +131,55 @@ func (o *Options) BindFlags(flags *pflag.FlagSet) {
 	flags.BoolVar(&o.DefaultSnapshotMoveData, "default-snapshot-move-data", o.DefaultSnapshotMoveData, "Bool flag to configure Velero server to move data by default for all snapshots supporting data movement. Optional.")
 	flags.BoolVar(&o.DisableInformerCache, "disable-informer-cache", o.DisableInformerCache, "Disable informer cache for Get calls on restore. With this enabled, it will speed up restore in cases where there are backup resources which already exist in the cluster, but for very large clusters this will increase velero memory usage. Default is false (don't disable). Optional.")
 	flags.BoolVar(&o.ScheduleSkipImmediately, "schedule-skip-immediately", o.ScheduleSkipImmediately, "Skip the first scheduled backup immediately after creating a schedule. Default is false (don't skip).")
-	flags.IntVar(&o.MaintenanceCfg.KeepLatestMaitenanceJobs, "keep-latest-maintenance-jobs", o.MaintenanceCfg.KeepLatestMaitenanceJobs, "Number of latest maintenance jobs to keep each repository. Optional.")
-	flags.StringVar(&o.MaintenanceCfg.CPURequest, "maintenance-job-cpu-request", o.MaintenanceCfg.CPURequest, "CPU request for maintenance jobs. Default is no limit.")
-	flags.StringVar(&o.MaintenanceCfg.MemRequest, "maintenance-job-mem-request", o.MaintenanceCfg.MemRequest, "Memory request for maintenance jobs. Default is no limit.")
-	flags.StringVar(&o.MaintenanceCfg.CPULimit, "maintenance-job-cpu-limit", o.MaintenanceCfg.CPULimit, "CPU limit for maintenance jobs. Default is no limit.")
-	flags.StringVar(&o.MaintenanceCfg.MemLimit, "maintenance-job-mem-limit", o.MaintenanceCfg.MemLimit, "Memory limit for maintenance jobs. Default is no limit.")
+
+	flags.IntVar(
+		&o.KeepLatestMaintenanceJobs,
+		"keep-latest-maintenance-jobs",
+		o.KeepLatestMaintenanceJobs,
+		"Number of latest maintenance jobs to keep each repository. Optional.",
+	)
+	flags.StringVar(
+		&o.PodResources.CPURequest,
+		"maintenance-job-cpu-request",
+		o.PodResources.CPURequest,
+		"CPU request for maintenance jobs. Default is no limit.",
+	)
+	flags.StringVar(
+		&o.PodResources.MemoryRequest,
+		"maintenance-job-mem-request",
+		o.PodResources.MemoryRequest,
+		"Memory request for maintenance jobs. Default is no limit.",
+	)
+	flags.StringVar(
+		&o.PodResources.CPULimit,
+		"maintenance-job-cpu-limit",
+		o.PodResources.CPULimit,
+		"CPU limit for maintenance jobs. Default is no limit.",
+	)
+	flags.StringVar(
+		&o.PodResources.MemoryLimit,
+		"maintenance-job-mem-limit",
+		o.PodResources.MemoryLimit,
+		"Memory limit for maintenance jobs. Default is no limit.",
+	)
+	flags.StringVar(
+		&o.BackupRepoConfigMap,
+		"backup-repository-configmap",
+		o.BackupRepoConfigMap,
+		"The name of configMap containing backup repository configurations.",
+	)
+	flags.StringVar(
+		&o.RepoMaintenanceJobConfigMap,
+		"repo-maintenance-job-configmap",
+		o.RepoMaintenanceJobConfigMap,
+		"The name of ConfigMap containing repository maintenance Job configurations.",
+	)
+	flags.StringVar(
+		&o.NodeAgentConfigMap,
+		"node-agent-configmap",
+		o.NodeAgentConfigMap,
+		"The name of ConfigMap containing node-agent configurations.",
+	)
 }
 
 // NewInstallOptions instantiates a new, default InstallOptions struct.
@@ -231,7 +276,11 @@ func (o *Options) AsVeleroOptions() (*install.VeleroOptions, error) {
 		DefaultSnapshotMoveData:         o.DefaultSnapshotMoveData,
 		DisableInformerCache:            o.DisableInformerCache,
 		ScheduleSkipImmediately:         o.ScheduleSkipImmediately,
-		MaintenanceCfg:                  o.MaintenanceCfg,
+		PodResources:                    o.PodResources,
+		KeepLatestMaintenanceJobs:       o.KeepLatestMaintenanceJobs,
+		BackupRepoConfigMap:             o.BackupRepoConfigMap,
+		RepoMaintenanceJobConfigMap:     o.RepoMaintenanceJobConfigMap,
+		NodeAgentConfigMap:              o.NodeAgentConfigMap,
 	}, nil
 }
 
@@ -364,13 +413,15 @@ func (o *Options) Validate(c *cobra.Command, args []string, f client.Factory) er
 		return err
 	}
 
-	if err := uploader.ValidateUploaderType(o.UploaderType); err != nil {
-		return err
-	}
-
 	// If we're only installing CRDs, we can skip the rest of the validation.
 	if o.CRDsOnly {
 		return nil
+	}
+
+	if msg, err := uploader.ValidateUploaderType(o.UploaderType); err != nil {
+		return err
+	} else if msg != "" {
+		fmt.Printf("⚠️  %s\n", msg)
 	}
 
 	// Our main 3 providers don't support bucket names starting with a dash, and a bucket name starting with one

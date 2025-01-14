@@ -57,6 +57,7 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/plugin/framework"
 	pluginmocks "github.com/vmware-tanzu/velero/pkg/plugin/mocks"
 	biav2 "github.com/vmware-tanzu/velero/pkg/plugin/velero/backupitemaction/v2"
+	ibav1 "github.com/vmware-tanzu/velero/pkg/plugin/velero/itemblockaction/v1"
 	velerotest "github.com/vmware-tanzu/velero/pkg/test"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
@@ -67,13 +68,15 @@ type fakeBackupper struct {
 	mock.Mock
 }
 
-func (b *fakeBackupper) Backup(logger logrus.FieldLogger, backup *pkgbackup.Request, backupFile io.Writer, actions []biav2.BackupItemAction, volumeSnapshotterGetter pkgbackup.VolumeSnapshotterGetter) error {
-	args := b.Called(logger, backup, backupFile, actions, volumeSnapshotterGetter)
+func (b *fakeBackupper) Backup(logger logrus.FieldLogger, backup *pkgbackup.Request, backupFile io.Writer, actions []biav2.BackupItemAction, itemBlockActions []ibav1.ItemBlockAction, volumeSnapshotterGetter pkgbackup.VolumeSnapshotterGetter) error {
+	args := b.Called(logger, backup, backupFile, actions, itemBlockActions, volumeSnapshotterGetter)
 	return args.Error(0)
 }
 
 func (b *fakeBackupper) BackupWithResolvers(logger logrus.FieldLogger, backup *pkgbackup.Request, backupFile io.Writer,
-	backupItemActionResolver framework.BackupItemActionResolverV2, volumeSnapshotterGetter pkgbackup.VolumeSnapshotterGetter) error {
+	backupItemActionResolver framework.BackupItemActionResolverV2,
+	itemBlockActionResolver framework.ItemBlockActionResolver,
+	volumeSnapshotterGetter pkgbackup.VolumeSnapshotterGetter) error {
 	args := b.Called(logger, backup, backupFile, backupItemActionResolver, volumeSnapshotterGetter)
 	return args.Error(0)
 }
@@ -85,6 +88,7 @@ func (b *fakeBackupper) FinalizeBackup(
 	outBackupFile io.Writer,
 	backupItemActionResolver framework.BackupItemActionResolverV2,
 	asyncBIAOperations []*itemoperation.BackupOperation,
+	backupStore persistence.BackupStore,
 ) error {
 	args := b.Called(logger, backup, inBackupFile, outBackupFile, backupItemActionResolver, asyncBIAOperations)
 	return args.Error(0)
@@ -138,8 +142,8 @@ func TestProcessBackupNonProcessedItems(t *testing.T) {
 				require.NoError(t, c.kbClient.Create(context.Background(), test.backup))
 			}
 			actualResult, err := c.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: test.backup.Namespace, Name: test.backup.Name}})
-			assert.Equal(t, actualResult, ctrl.Result{})
-			assert.Nil(t, err)
+			assert.Equal(t, ctrl.Result{}, actualResult)
+			assert.NoError(t, err)
 
 			// Any backup that would actually proceed to validation will cause a segfault because this
 			// test hasn't set up the necessary controller dependencies for validation/etc. So the lack
@@ -173,7 +177,7 @@ func TestProcessBackupValidationFailures(t *testing.T) {
 		{
 			name:         "non-existent backup location fails validation",
 			backup:       defaultBackup().StorageLocation("nonexistent").Result(),
-			expectedErrs: []string{"an existing backup storage location wasn't specified at backup creation time and the default 'nonexistent' wasn't found. Please address this issue (see `velero backup-location -h` for options) and create a new backup. Error: backupstoragelocations.velero.io \"nonexistent\" not found"},
+			expectedErrs: []string{"an existing backup storage location was not specified at backup creation time and the default nonexistent was not found. Please address this issue (see `velero backup-location -h` for options) and create a new backup. Error: backupstoragelocations.velero.io \"nonexistent\" not found"},
 		},
 		{
 			name:           "backup for read-only backup location fails validation",
@@ -190,15 +194,9 @@ func TestProcessBackupValidationFailures(t *testing.T) {
 		},
 		{
 			name:           "use old filter parameters and new filter parameters together",
-			backup:         defaultBackup().IncludeClusterResources(true).IncludedNamespaceScopedResources("Deployment").IncludedNamespaces("foo").Result(),
+			backup:         defaultBackup().IncludeClusterResources(true).IncludedNamespaceScopedResources("Deployment").IncludedNamespaces("default").Result(),
 			backupLocation: defaultBackupLocation,
 			expectedErrs:   []string{"include-resources, exclude-resources and include-cluster-resources are old filter parameters.\ninclude-cluster-scoped-resources, exclude-cluster-scoped-resources, include-namespace-scoped-resources and exclude-namespace-scoped-resources are new filter parameters.\nThey cannot be used together"},
-		},
-		{
-			name:           "nonexisting namespace",
-			backup:         defaultBackup().IncludedNamespaces("non-existing").Result(),
-			backupLocation: defaultBackupLocation,
-			expectedErrs:   []string{"Invalid included/excluded namespace lists: namespaces \"non-existing\" not found"},
 		},
 	}
 
@@ -214,11 +212,10 @@ func TestProcessBackupValidationFailures(t *testing.T) {
 			require.NoError(t, err)
 
 			var fakeClient kbclient.Client
-			namespace := builder.ForNamespace("foo").Result()
 			if test.backupLocation != nil {
-				fakeClient = velerotest.NewFakeControllerRuntimeClient(t, test.backupLocation, namespace)
+				fakeClient = velerotest.NewFakeControllerRuntimeClient(t, test.backupLocation)
 			} else {
-				fakeClient = velerotest.NewFakeControllerRuntimeClient(t, namespace)
+				fakeClient = velerotest.NewFakeControllerRuntimeClient(t)
 			}
 
 			c := &backupReconciler{
@@ -235,8 +232,8 @@ func TestProcessBackupValidationFailures(t *testing.T) {
 			require.NoError(t, c.kbClient.Create(context.Background(), test.backup))
 
 			actualResult, err := c.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: test.backup.Namespace, Name: test.backup.Name}})
-			assert.Equal(t, actualResult, ctrl.Result{})
-			assert.Nil(t, err)
+			assert.Equal(t, ctrl.Result{}, actualResult)
+			assert.NoError(t, err)
 			res := &velerov1api.Backup{}
 			err = c.kbClient.Get(context.Background(), kbclient.ObjectKey{Namespace: test.backup.Namespace, Name: test.backup.Name}, res)
 			require.NoError(t, err)
@@ -336,7 +333,7 @@ func Test_prepareBackupRequest_BackupStorageLocation(t *testing.T) {
 			backupLocationInAPIServer:        nil,
 			defaultBackupLocationInAPIServer: nil,
 			expectedSuccess:                  false,
-			expectedValidationError:          "an existing backup storage location wasn't specified at backup creation time and the default 'test-backup-location' wasn't found. Please address this issue (see `velero backup-location -h` for options) and create a new backup. Error: backupstoragelocations.velero.io \"test-backup-location\" not found",
+			expectedValidationError:          "an existing backup storage location was not specified at backup creation time and the default test-backup-location was not found. Please address this issue (see `velero backup-location -h` for options) and create a new backup. Error: backupstoragelocations.velero.io \"test-backup-location\" not found",
 		},
 		{
 			name:                             "Using default BackupLocation and it can be found in ApiServer",
@@ -354,7 +351,7 @@ func Test_prepareBackupRequest_BackupStorageLocation(t *testing.T) {
 			backupLocationInAPIServer:        nil,
 			defaultBackupLocationInAPIServer: nil,
 			expectedSuccess:                  false,
-			expectedValidationError:          fmt.Sprintf("an existing backup storage location wasn't specified at backup creation time and the server default '%s' doesn't exist. Please address this issue (see `velero backup-location -h` for options) and create a new backup. Error: backupstoragelocations.velero.io \"%s\" not found", defaultBackupLocation, defaultBackupLocation),
+			expectedValidationError:          fmt.Sprintf("an existing backup storage location was not specified at backup creation time and the server default %s does not exist. Please address this issue (see `velero backup-location -h` for options) and create a new backup. Error: backupstoragelocations.velero.io \"%s\" not found", defaultBackupLocation, defaultBackupLocation),
 		},
 	}
 
@@ -571,11 +568,11 @@ func TestDefaultVolumesToResticDeprecation(t *testing.T) {
 			if test.expectRemap {
 				assert.Equal(t, res.Spec.DefaultVolumesToRestic, res.Spec.DefaultVolumesToFsBackup)
 			} else if test.expectGlobal {
-				assert.False(t, res.Spec.DefaultVolumesToRestic == res.Spec.DefaultVolumesToFsBackup)
+				assert.NotSame(t, res.Spec.DefaultVolumesToRestic, res.Spec.DefaultVolumesToFsBackup)
 				assert.Equal(t, &c.defaultVolumesToFsBackup, res.Spec.DefaultVolumesToFsBackup)
 			} else {
-				assert.False(t, res.Spec.DefaultVolumesToRestic == res.Spec.DefaultVolumesToFsBackup)
-				assert.False(t, &c.defaultVolumesToFsBackup == res.Spec.DefaultVolumesToFsBackup)
+				assert.NotSame(t, res.Spec.DefaultVolumesToRestic, res.Spec.DefaultVolumesToFsBackup)
+				assert.NotEqual(t, &c.defaultVolumesToFsBackup, res.Spec.DefaultVolumesToFsBackup)
 			}
 
 			assert.Equal(t, test.expectVal, *res.Spec.DefaultVolumesToFsBackup)
@@ -1351,6 +1348,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			}
 
 			pluginManager.On("GetBackupItemActionsV2").Return(nil, nil)
+			pluginManager.On("GetItemBlockActions").Return(nil, nil)
 			pluginManager.On("CleanupClients").Return(nil)
 			backupper.On("Backup", mock.Anything, mock.Anything, mock.Anything, []biav2.BackupItemAction(nil), pluginManager).Return(nil)
 			backupper.On("BackupWithResolvers", mock.Anything, mock.Anything, mock.Anything, framework.BackupItemActionResolverV2{}, pluginManager).Return(nil)
@@ -1383,8 +1381,8 @@ func TestProcessBackupCompletions(t *testing.T) {
 			}
 
 			actualResult, err := c.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: test.backup.Namespace, Name: test.backup.Name}})
-			assert.Equal(t, actualResult, ctrl.Result{})
-			assert.Nil(t, err)
+			assert.Equal(t, ctrl.Result{}, actualResult)
+			assert.NoError(t, err)
 
 			// Disable CSI feature to not impact other test cases.
 			if test.enableCSI {
@@ -1572,43 +1570,6 @@ func TestValidateAndGetSnapshotLocations(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestValidateNamespaceIncludesExcludes(t *testing.T) {
-	namespace := builder.ForNamespace("default").Result()
-	reconciler := &backupReconciler{
-		kbClient: velerotest.NewFakeControllerRuntimeClient(t, namespace),
-	}
-
-	// empty string as includedNamespaces
-	includedNamespaces := []string{""}
-	excludedNamespaces := []string{"test"}
-	errs := reconciler.validateNamespaceIncludesExcludes(includedNamespaces, excludedNamespaces)
-	assert.Empty(t, errs)
-
-	// "*" as includedNamespaces
-	includedNamespaces = []string{"*"}
-	excludedNamespaces = []string{"test"}
-	errs = reconciler.validateNamespaceIncludesExcludes(includedNamespaces, excludedNamespaces)
-	assert.Empty(t, errs)
-
-	// invalid namespaces
-	includedNamespaces = []string{"1@#"}
-	excludedNamespaces = []string{"2@#"}
-	errs = reconciler.validateNamespaceIncludesExcludes(includedNamespaces, excludedNamespaces)
-	assert.Len(t, errs, 2)
-
-	// not exist namespaces
-	includedNamespaces = []string{"non-existing-namespace"}
-	excludedNamespaces = []string{}
-	errs = reconciler.validateNamespaceIncludesExcludes(includedNamespaces, excludedNamespaces)
-	assert.Len(t, errs, 1)
-
-	// valid namespaces
-	includedNamespaces = []string{"default"}
-	excludedNamespaces = []string{}
-	errs = reconciler.validateNamespaceIncludesExcludes(includedNamespaces, excludedNamespaces)
-	assert.Empty(t, errs)
 }
 
 // Test_getLastSuccessBySchedule verifies that the getLastSuccessBySchedule helper function correctly returns

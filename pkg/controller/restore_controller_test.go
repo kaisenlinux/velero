@@ -116,6 +116,7 @@ func TestFetchBackupInfo(t *testing.T) {
 				60*time.Minute,
 				false,
 				fakeGlobalClient,
+				10*time.Minute,
 			)
 
 			if test.backupStoreError == nil {
@@ -179,7 +180,7 @@ func TestProcessQueueItemSkips(t *testing.T) {
 			)
 
 			if test.restore != nil {
-				assert.Nil(t, fakeClient.Create(context.Background(), test.restore))
+				assert.NoError(t, fakeClient.Create(context.Background(), test.restore))
 			}
 
 			r := NewRestoreReconciler(
@@ -196,6 +197,7 @@ func TestProcessQueueItemSkips(t *testing.T) {
 				60*time.Minute,
 				false,
 				fakeGlobalClient,
+				10*time.Minute,
 			)
 
 			_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
@@ -498,6 +500,7 @@ func TestRestoreReconcile(t *testing.T) {
 				60*time.Minute,
 				false,
 				fakeGlobalClient,
+				10*time.Minute,
 			)
 
 			r.clock = clocktesting.NewFakeClock(now)
@@ -613,12 +616,6 @@ func TestRestoreReconcile(t *testing.T) {
 				},
 			}
 
-			if test.restore.Spec.ScheduleName != "" && test.backup != nil {
-				expected.Spec = SpecPatch{
-					BackupName: test.backup.Name,
-				}
-			}
-
 			if test.expectedStartTime != nil {
 				expected.Status.StartTimestamp = test.expectedStartTime
 			}
@@ -687,6 +684,7 @@ func TestValidateAndCompleteWhenScheduleNameSpecified(t *testing.T) {
 		60*time.Minute,
 		false,
 		fakeGlobalClient,
+		10*time.Minute,
 	)
 
 	restore := &velerov1api.Restore{
@@ -782,6 +780,7 @@ func TestValidateAndCompleteWithResourceModifierSpecified(t *testing.T) {
 		60*time.Minute,
 		false,
 		fakeGlobalClient,
+		10*time.Minute,
 	)
 
 	restore := &velerov1api.Restore{

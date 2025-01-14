@@ -27,7 +27,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	. "github.com/vmware-tanzu/velero/test"
@@ -74,14 +74,17 @@ func TTLTest() {
 
 	AfterEach(func() {
 		veleroCfg.GCFrequency = ""
-		if !veleroCfg.Debug {
+
+		if CurrentSpecReport().Failed() && veleroCfg.FailFast {
+			fmt.Println("Test case failed and fail fast is enabled. Skip resource clean up.")
+		} else {
 			By("Clean backups after test", func() {
 				DeleteAllBackups(context.Background(), &veleroCfg)
 			})
 			ctx, ctxCancel := context.WithTimeout(context.Background(), time.Minute*5)
 			defer ctxCancel()
 			if InstallVelero {
-				Expect(VeleroUninstall(ctx, veleroCfg.VeleroCLI, veleroCfg.VeleroNamespace)).To(Succeed())
+				Expect(VeleroUninstall(ctx, veleroCfg)).To(Succeed())
 			}
 			Expect(DeleteNamespace(ctx, client, test.testNS, false)).To(Succeed(), fmt.Sprintf("Failed to delete the namespace %s", test.testNS))
 		}
@@ -119,19 +122,31 @@ func TTLTest() {
 
 		var snapshotCheckPoint SnapshotCheckPoint
 		if useVolumeSnapshots {
-			if veleroCfg.CloudProvider == Vsphere {
-				// TODO - remove after upload progress monitoring is implemented
+			if veleroCfg.HasVspherePlugin {
 				By("Waiting for vSphere uploads to complete", func() {
 					Expect(WaitForVSphereUploadCompletion(ctx, time.Hour,
 						test.testNS, 2)).To(Succeed())
 				})
 			}
-			snapshotCheckPoint, err = GetSnapshotCheckPoint(client, veleroCfg, 2, test.testNS, test.backupName, KibishiiPVCNameList)
-			Expect(err).NotTo(HaveOccurred(), "Fail to get Azure CSI snapshot checkpoint")
 
-			Expect(SnapshotsShouldBeCreatedInCloud(veleroCfg.CloudProvider,
-				veleroCfg.CloudCredentialsFile, veleroCfg.BSLBucket, veleroCfg.BSLConfig,
-				test.backupName, snapshotCheckPoint)).NotTo(HaveOccurred(), "Fail to get Azure CSI snapshot checkpoint")
+			snapshotCheckPoint, err = GetSnapshotCheckPoint(
+				client,
+				veleroCfg,
+				2,
+				test.testNS,
+				test.backupName,
+				KibishiiPVCNameList,
+			)
+			Expect(err).NotTo(HaveOccurred(), "Fail to get snapshot checkpoint")
+
+			Expect(
+				CheckSnapshotsInProvider(
+					veleroCfg,
+					test.backupName,
+					snapshotCheckPoint,
+					false,
+				),
+			).NotTo(HaveOccurred(), "Fail to verify the created snapshots")
 		}
 
 		By(fmt.Sprintf("Simulating a disaster by removing namespace %s\n", BackupCfg.BackupName), func() {
@@ -185,9 +200,13 @@ func TTLTest() {
 
 		By("PersistentVolume snapshots should be deleted", func() {
 			if useVolumeSnapshots {
-				Expect(SnapshotsShouldNotExistInCloud(veleroCfg.CloudProvider,
-					veleroCfg.CloudCredentialsFile, veleroCfg.BSLBucket, veleroCfg.BSLConfig,
-					test.backupName, snapshotCheckPoint)).NotTo(HaveOccurred(), "Fail to get Azure CSI snapshot checkpoint")
+				snapshotCheckPoint.ExpectCount = 0
+				Expect(CheckSnapshotsInProvider(
+					veleroCfg,
+					test.backupName,
+					snapshotCheckPoint,
+					false,
+				)).NotTo(HaveOccurred(), "Fail to get Azure CSI snapshot checkpoint")
 			}
 		})
 

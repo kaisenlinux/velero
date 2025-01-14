@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM --platform=$TARGETPLATFORM golang:1.22.2-bookworm
+FROM --platform=$TARGETPLATFORM golang:1.22.10-bookworm
 
 ARG GOPROXY
 
@@ -69,7 +69,8 @@ RUN ARCH=$(go env GOARCH) && \
     chmod a+x /usr/include/google/protobuf && \
     chmod a+r -R /usr/include/google && \
     chmod +x /usr/bin/protoc
-RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.32.0
+RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.33.0 \
+    && go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.3.0
 
 # get goreleaser
 # goreleaser name template per arch is basically goarch except for amd64 and 386 https://github.com/goreleaser/goreleaser/blob/ec8819a95c5527fae65e5cb41673f5bbc3245fda/.goreleaser.yaml#L167C1-L173C42
@@ -87,7 +88,7 @@ RUN ARCH=$(go env GOARCH) && \
     elif [ "$ARCH" = "ppc64le" ] ; then \
         ARCH="ppc64"; \
     fi && \
-    wget --quiet "https://github.com/goreleaser/goreleaser/releases/download/v1.15.2/goreleaser_Linux_$ARCH.tar.gz" && \
+    wget --quiet "https://github.com/goreleaser/goreleaser/releases/download/v1.26.2/goreleaser_Linux_$ARCH.tar.gz" && \
     tar xvf goreleaser_Linux_$ARCH.tar.gz; \
     mv goreleaser /usr/bin/goreleaser && \
     chmod +x /usr/bin/goreleaser

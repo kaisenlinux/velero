@@ -34,12 +34,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	"github.com/vmware-tanzu/velero/pkg/constant"
 	"github.com/vmware-tanzu/velero/pkg/features"
 	"github.com/vmware-tanzu/velero/pkg/label"
 	"github.com/vmware-tanzu/velero/pkg/persistence"
 	"github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt"
 	"github.com/vmware-tanzu/velero/pkg/util/kube"
 
+	corev1api "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -77,7 +79,7 @@ func NewBackupSyncReconciler(
 
 // Reconcile syncs between the backups in cluster and backups metadata in object store.
 func (b *backupSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := b.logger.WithField("controller", BackupSync)
+	log := b.logger.WithField("controller", constant.ControllerBackupSync)
 	log = log.WithField("backupLocation", req.String())
 	log.Debug("Begin to sync between backups' metadata in BSL object storage and cluster's existing backups.")
 
@@ -272,6 +274,20 @@ func (b *backupSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			for _, snapCont := range snapConts {
 				// TODO: Reset ResourceVersion prior to persisting VolumeSnapshotContents
 				snapCont.ResourceVersion = ""
+				// Make the VolumeSnapshotContent static
+				snapCont.Spec.Source = snapshotv1api.VolumeSnapshotContentSource{
+					SnapshotHandle: snapCont.Status.SnapshotHandle,
+				}
+				// Set VolumeSnapshotRef to none exist one, because VolumeSnapshotContent
+				// validation webhook will check whether name and namespace are nil.
+				// external-snapshotter needs Source pointing to snapshot and VolumeSnapshot
+				// reference's UID to nil to determine the VolumeSnapshotContent is deletable.
+				snapCont.Spec.VolumeSnapshotRef = corev1api.ObjectReference{
+					APIVersion: snapshotv1api.SchemeGroupVersion.String(),
+					Kind:       "VolumeSnapshot",
+					Namespace:  "ns-" + string(snapCont.UID),
+					Name:       "name-" + string(snapCont.UID),
+				}
 				err := b.client.Create(ctx, snapCont, &client.CreateOptions{})
 				switch {
 				case err != nil && apierrors.IsAlreadyExists(err):
@@ -332,7 +348,7 @@ func (b *backupSyncReconciler) filterBackupOwnerReferences(ctx context.Context, 
 // SetupWithManager is used to setup controller and its watching sources.
 func (b *backupSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	backupSyncSource := kube.NewPeriodicalEnqueueSource(
-		b.logger,
+		b.logger.WithField("controller", constant.ControllerBackupSync),
 		mgr.GetClient(),
 		&velerov1api.BackupStorageLocationList{},
 		backupSyncReconcilePeriod,

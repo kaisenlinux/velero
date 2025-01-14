@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	. "github.com/vmware-tanzu/velero/test"
@@ -67,7 +67,14 @@ func APIExtensionsVersionsTest() {
 		})
 	})
 	AfterEach(func() {
-		if !veleroCfg.Debug {
+		By(fmt.Sprintf("Switch to default kubeconfig context %s", veleroCfg.DefaultClusterContext), func() {
+			Expect(KubectlConfigUseContext(context.Background(), veleroCfg.DefaultClusterContext)).To(Succeed())
+			veleroCfg.ClientToInstallVelero = veleroCfg.DefaultClient
+		})
+
+		if CurrentSpecReport().Failed() && veleroCfg.FailFast {
+			fmt.Println("Test case failed and fail fast is enabled. Skip resource clean up.")
+		} else {
 			By("Clean backups after test", func() {
 				DeleteAllBackups(context.Background(), &veleroCfg)
 			})
@@ -76,20 +83,14 @@ func APIExtensionsVersionsTest() {
 					ctx, ctxCancel := context.WithTimeout(context.Background(), time.Minute*5)
 					defer ctxCancel()
 					Expect(KubectlConfigUseContext(context.Background(), veleroCfg.DefaultClusterContext)).To(Succeed())
-					Expect(VeleroUninstall(ctx, veleroCfg.VeleroCLI,
-						veleroCfg.VeleroNamespace)).To(Succeed())
+					Expect(VeleroUninstall(ctx, veleroCfg)).To(Succeed())
 					Expect(DeleteCRDByName(context.Background(), crdName)).To(Succeed())
 
 					Expect(KubectlConfigUseContext(context.Background(), veleroCfg.StandbyClusterContext)).To(Succeed())
-					Expect(VeleroUninstall(ctx, veleroCfg.VeleroCLI,
-						veleroCfg.VeleroNamespace)).To(Succeed())
+					Expect(VeleroUninstall(ctx, veleroCfg)).To(Succeed())
 					Expect(DeleteCRDByName(context.Background(), crdName)).To(Succeed())
 				})
 			}
-			By(fmt.Sprintf("Switch to default kubeconfig context %s", veleroCfg.DefaultClusterContext), func() {
-				Expect(KubectlConfigUseContext(context.Background(), veleroCfg.DefaultClusterContext)).To(Succeed())
-				veleroCfg.ClientToInstallVelero = veleroCfg.DefaultClient
-			})
 		}
 	})
 	Context("When EnableAPIGroupVersions flag is set", func() {

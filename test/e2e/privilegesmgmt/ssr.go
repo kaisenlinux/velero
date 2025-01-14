@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -50,7 +50,7 @@ func SSRTest() {
 	})
 
 	It(fmt.Sprintf("Should create an ssr object in the %s namespace and later removed by controller", veleroCfg.VeleroNamespace), func() {
-		ctx, ctxCancel := context.WithTimeout(context.Background(), time.Duration(time.Minute*10))
+		ctx, ctxCancel := context.WithTimeout(context.Background(), time.Minute*10)
 		defer ctxCancel()
 		defer DeleteNamespace(context.TODO(), *veleroCfg.ClientToInstallVelero, testNS, false)
 		By(fmt.Sprintf("Create %s namespace", testNS))

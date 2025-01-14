@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/vmware-tanzu/velero/pkg/repository"
+	"github.com/vmware-tanzu/velero/pkg/util/kube"
 )
 
 func TestDeployment(t *testing.T) {
@@ -31,7 +31,7 @@ func TestDeployment(t *testing.T) {
 
 	assert.Equal(t, "velero", deploy.ObjectMeta.Namespace)
 
-	deploy = Deployment("velero", WithRestoreOnly())
+	deploy = Deployment("velero", WithRestoreOnly(true))
 	assert.Equal(t, "--restore-only", deploy.Spec.Template.Spec.Containers[0].Args[1])
 
 	deploy = Deployment("velero", WithEnvFromSecretKey("my-var", "my-secret", "my-key"))
@@ -67,21 +67,36 @@ func TestDeployment(t *testing.T) {
 	deploy = Deployment("velero", WithServiceAccountName("test-sa"))
 	assert.Equal(t, "test-sa", deploy.Spec.Template.Spec.ServiceAccountName)
 
-	deploy = Deployment("velero", WithDisableInformerCache())
+	deploy = Deployment("velero", WithDisableInformerCache(true))
 	assert.Len(t, deploy.Spec.Template.Spec.Containers[0].Args, 2)
 	assert.Equal(t, "--disable-informer-cache=true", deploy.Spec.Template.Spec.Containers[0].Args[1])
 
-	deploy = Deployment("velero", WithMaintenanceConfig(repository.MaintenanceConfig{
-		KeepLatestMaitenanceJobs: 3,
-		CPURequest:               "100m",
-		MemRequest:               "256Mi",
-		CPULimit:                 "200m",
-		MemLimit:                 "512Mi",
-	}))
-	assert.Len(t, deploy.Spec.Template.Spec.Containers[0].Args, 6)
+	deploy = Deployment("velero", WithKeepLatestMaintenanceJobs(3))
+	assert.Len(t, deploy.Spec.Template.Spec.Containers[0].Args, 2)
 	assert.Equal(t, "--keep-latest-maintenance-jobs=3", deploy.Spec.Template.Spec.Containers[0].Args[1])
-	assert.Equal(t, "--maintenance-job-cpu-limit=200m", deploy.Spec.Template.Spec.Containers[0].Args[2])
-	assert.Equal(t, "--maintenance-job-cpu-request=100m", deploy.Spec.Template.Spec.Containers[0].Args[3])
-	assert.Equal(t, "--maintenance-job-mem-limit=512Mi", deploy.Spec.Template.Spec.Containers[0].Args[4])
-	assert.Equal(t, "--maintenance-job-mem-request=256Mi", deploy.Spec.Template.Spec.Containers[0].Args[5])
+
+	deploy = Deployment(
+		"velero",
+		WithPodResources(
+			kube.PodResources{
+				CPURequest:    "100m",
+				MemoryRequest: "256Mi",
+				CPULimit:      "200m",
+				MemoryLimit:   "512Mi",
+			},
+		),
+	)
+	assert.Len(t, deploy.Spec.Template.Spec.Containers[0].Args, 5)
+	assert.Equal(t, "--maintenance-job-cpu-limit=200m", deploy.Spec.Template.Spec.Containers[0].Args[1])
+	assert.Equal(t, "--maintenance-job-cpu-request=100m", deploy.Spec.Template.Spec.Containers[0].Args[2])
+	assert.Equal(t, "--maintenance-job-mem-limit=512Mi", deploy.Spec.Template.Spec.Containers[0].Args[3])
+	assert.Equal(t, "--maintenance-job-mem-request=256Mi", deploy.Spec.Template.Spec.Containers[0].Args[4])
+
+	deploy = Deployment("velero", WithBackupRepoConfigMap("test-backup-repo-config"))
+	assert.Len(t, deploy.Spec.Template.Spec.Containers[0].Args, 2)
+	assert.Equal(t, "--backup-repository-configmap=test-backup-repo-config", deploy.Spec.Template.Spec.Containers[0].Args[1])
+
+	deploy = Deployment("velero", WithRepoMaintenanceJobConfigMap("test-repo-maintenance-config"))
+	assert.Len(t, deploy.Spec.Template.Spec.Containers[0].Args, 2)
+	assert.Equal(t, "--repo-maintenance-job-configmap=test-repo-maintenance-config", deploy.Spec.Template.Spec.Containers[0].Args[1])
 }

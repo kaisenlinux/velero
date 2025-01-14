@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -140,6 +141,7 @@ func (r *PodVolumeBackupReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	pvb.Status.Phase = velerov1api.PodVolumeBackupPhaseInProgress
 	pvb.Status.StartTimestamp = &metav1.Time{Time: r.clock.Now()}
 	if err := r.Client.Patch(ctx, &pvb, client.MergeFrom(original)); err != nil {
+		r.closeDataPath(ctx, pvb.Name)
 		return r.errorOut(ctx, &pvb, err, "error updating PodVolumeBackup status", log)
 	}
 
@@ -149,18 +151,28 @@ func (r *PodVolumeBackupReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		Name:      pvb.Spec.Pod.Name,
 	}
 	if err := r.Client.Get(ctx, podNamespacedName, &pod); err != nil {
+		r.closeDataPath(ctx, pvb.Name)
 		return r.errorOut(ctx, &pvb, err, fmt.Sprintf("getting pod %s/%s", pvb.Spec.Pod.Namespace, pvb.Spec.Pod.Name), log)
 	}
 
 	path, err := exposer.GetPodVolumeHostPath(ctx, &pod, pvb.Spec.Volume, r.Client, r.fileSystem, log)
 	if err != nil {
+		r.closeDataPath(ctx, pvb.Name)
 		return r.errorOut(ctx, &pvb, err, "error exposing host path for pod volume", log)
 	}
 
 	log.WithField("path", path.ByPath).Debugf("Found host path")
 
-	if err := fsBackup.Init(ctx, pvb.Spec.BackupStorageLocation, pvb.Spec.Pod.Namespace, pvb.Spec.UploaderType,
-		podvolume.GetPvbRepositoryType(&pvb), pvb.Spec.RepoIdentifier, r.repositoryEnsurer, r.credentialGetter); err != nil {
+	if err := fsBackup.Init(ctx, &datapath.FSBRInitParam{
+		BSLName:           pvb.Spec.BackupStorageLocation,
+		SourceNamespace:   pvb.Spec.Pod.Namespace,
+		UploaderType:      pvb.Spec.UploaderType,
+		RepositoryType:    podvolume.GetPvbRepositoryType(&pvb),
+		RepoIdentifier:    pvb.Spec.RepoIdentifier,
+		RepositoryEnsurer: r.repositoryEnsurer,
+		CredentialGetter:  r.credentialGetter,
+	}); err != nil {
+		r.closeDataPath(ctx, pvb.Name)
 		return r.errorOut(ctx, &pvb, err, "error to initialize data path", log)
 	}
 
@@ -179,7 +191,13 @@ func (r *PodVolumeBackupReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	}
 
-	if err := fsBackup.StartBackup(path, "", parentSnapshotID, false, pvb.Spec.Tags, pvb.Spec.UploaderSettings); err != nil {
+	if err := fsBackup.StartBackup(path, pvb.Spec.UploaderSettings, &datapath.FSBRStartParam{
+		RealSource:     "",
+		ParentSnapshot: parentSnapshotID,
+		ForceFull:      false,
+		Tags:           pvb.Spec.Tags,
+	}); err != nil {
+		r.closeDataPath(ctx, pvb.Name)
 		return r.errorOut(ctx, &pvb, err, "error starting data path backup", log)
 	}
 
@@ -189,7 +207,7 @@ func (r *PodVolumeBackupReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 }
 
 func (r *PodVolumeBackupReconciler) OnDataPathCompleted(ctx context.Context, namespace string, pvbName string, result datapath.Result) {
-	defer r.closeDataPath(ctx, pvbName)
+	defer r.dataPathMgr.RemoveAsyncBR(pvbName)
 
 	log := r.logger.WithField("pvb", pvbName)
 
@@ -227,7 +245,7 @@ func (r *PodVolumeBackupReconciler) OnDataPathCompleted(ctx context.Context, nam
 }
 
 func (r *PodVolumeBackupReconciler) OnDataPathFailed(ctx context.Context, namespace, pvbName string, err error) {
-	defer r.closeDataPath(ctx, pvbName)
+	defer r.dataPathMgr.RemoveAsyncBR(pvbName)
 
 	log := r.logger.WithField("pvb", pvbName)
 
@@ -242,7 +260,7 @@ func (r *PodVolumeBackupReconciler) OnDataPathFailed(ctx context.Context, namesp
 }
 
 func (r *PodVolumeBackupReconciler) OnDataPathCancelled(ctx context.Context, namespace string, pvbName string) {
-	defer r.closeDataPath(ctx, pvbName)
+	defer r.dataPathMgr.RemoveAsyncBR(pvbName)
 
 	log := r.logger.WithField("pvb", pvbName)
 
@@ -348,7 +366,6 @@ func (r *PodVolumeBackupReconciler) closeDataPath(ctx context.Context, pvbName s
 }
 
 func (r *PodVolumeBackupReconciler) errorOut(ctx context.Context, pvb *velerov1api.PodVolumeBackup, err error, msg string, log logrus.FieldLogger) (ctrl.Result, error) {
-	r.closeDataPath(ctx, pvb.Name)
 	_ = UpdatePVBStatusToFailed(ctx, r.Client, pvb, err, msg, r.clock.Now(), log)
 
 	return ctrl.Result{}, err
@@ -361,7 +378,11 @@ func UpdatePVBStatusToFailed(ctx context.Context, c client.Client, pvb *velerov1
 	if dataPathError, ok := errOut.(datapath.DataPathError); ok {
 		pvb.Status.SnapshotID = dataPathError.GetSnapshotID()
 	}
-	pvb.Status.Message = errors.WithMessage(errOut, msg).Error()
+	if len(strings.TrimSpace(msg)) == 0 {
+		pvb.Status.Message = errOut.Error()
+	} else {
+		pvb.Status.Message = errors.WithMessage(errOut, msg).Error()
+	}
 	err := c.Patch(ctx, pvb, client.MergeFrom(original))
 	if err != nil {
 		log.WithError(err).Error("error updating PodVolumeBackup status")

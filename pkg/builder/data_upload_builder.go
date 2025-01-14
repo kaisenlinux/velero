@@ -133,7 +133,20 @@ func (d *DataUploadBuilder) Labels(labels map[string]string) *DataUploadBuilder 
 	return d
 }
 
+// Annotations sets the DataUpload's Annotations.
+func (d *DataUploadBuilder) Annotations(annotations map[string]string) *DataUploadBuilder {
+	d.object.Annotations = annotations
+	return d
+}
+
+// Progress sets the DataUpload's Progress.
 func (d *DataUploadBuilder) Progress(progress shared.DataMoveOperationProgress) *DataUploadBuilder {
 	d.object.Status.Progress = progress
+	return d
+}
+
+// Node sets the DataUpload's Node.
+func (d *DataUploadBuilder) Node(node string) *DataUploadBuilder {
+	d.object.Status.Node = node
 	return d
 }

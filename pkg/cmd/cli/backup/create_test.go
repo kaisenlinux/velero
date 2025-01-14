@@ -129,7 +129,7 @@ func TestCreateOptions_BuildBackupFromSchedule(t *testing.T) {
 
 func TestCreateOptions_OrderedResources(t *testing.T) {
 	_, err := ParseOrderedResources("pods= ns1/p1; ns1/p2; persistentvolumeclaims=ns2/pvc1, ns2/pvc2")
-	assert.NotNil(t, err)
+	assert.Error(t, err)
 
 	orderedResources, err := ParseOrderedResources("pods= ns1/p1,ns1/p2 ; persistentvolumeclaims=ns2/pvc1,ns2/pvc2")
 	assert.NoError(t, err)
@@ -138,7 +138,7 @@ func TestCreateOptions_OrderedResources(t *testing.T) {
 		"pods":                   "ns1/p1,ns1/p2",
 		"persistentvolumeclaims": "ns2/pvc1,ns2/pvc2",
 	}
-	assert.Equal(t, orderedResources, expectedResources)
+	assert.Equal(t, expectedResources, orderedResources)
 
 	orderedResources, err = ParseOrderedResources("pods= ns1/p1,ns1/p2 ; persistentvolumes=pv1,pv2")
 	assert.NoError(t, err)
@@ -147,7 +147,7 @@ func TestCreateOptions_OrderedResources(t *testing.T) {
 		"pods":              "ns1/p1,ns1/p2",
 		"persistentvolumes": "pv1,pv2",
 	}
-	assert.Equal(t, orderedResources, expectedMixedResources)
+	assert.Equal(t, expectedMixedResources, orderedResources)
 }
 
 func TestCreateCommand(t *testing.T) {
@@ -225,8 +225,8 @@ func TestCreateCommand(t *testing.T) {
 
 		//Validate
 		e = o.Validate(cmd, args, f)
-		require.Contains(t, e.Error(), "include-resources, exclude-resources and include-cluster-resources are old filter parameters")
-		require.Contains(t, e.Error(), "include-cluster-scoped-resources, exclude-cluster-scoped-resources, include-namespace-scoped-resources and exclude-namespace-scoped-resources are new filter parameters.\nThey cannot be used together")
+		require.ErrorContains(t, e, "include-resources, exclude-resources and include-cluster-resources are old filter parameters")
+		require.ErrorContains(t, e, "include-cluster-scoped-resources, exclude-cluster-scoped-resources, include-namespace-scoped-resources and exclude-namespace-scoped-resources are new filter parameters.\nThey cannot be used together")
 
 		//cmd
 		e = o.Run(cmd, f)
@@ -247,7 +247,7 @@ func TestCreateCommand(t *testing.T) {
 		require.Equal(t, excludeClusterScopedResources, o.ExcludeClusterScopedResources.String())
 		require.Equal(t, includeNamespaceScopedResources, o.IncludeNamespaceScopedResources.String())
 		require.Equal(t, excludeNamespaceScopedResources, o.ExcludeNamespaceScopedResources.String())
-		require.Equal(t, true, test.CompareSlice(strings.Split(labels, ","), strings.Split(o.Labels.String(), ",")))
+		require.True(t, test.CompareSlice(strings.Split(labels, ","), strings.Split(o.Labels.String(), ",")))
 		require.Equal(t, storageLocation, o.StorageLocation)
 		require.Equal(t, snapshotLocations, strings.Split(o.SnapshotLocations[0], ",")[0])
 		require.Equal(t, selector, o.Selector.String())
@@ -265,7 +265,7 @@ func TestCreateCommand(t *testing.T) {
 
 		// verify oldAndNewFilterParametersUsedTogether
 		mix := o.oldAndNewFilterParametersUsedTogether()
-		require.Equal(t, true, mix)
+		require.True(t, mix)
 	})
 
 	t.Run("create a backup create command with specific storage-location setting", func(t *testing.T) {
@@ -292,7 +292,7 @@ func TestCreateCommand(t *testing.T) {
 
 		// Validate
 		e = o.Validate(cmd, args, f)
-		assert.Contains(t, e.Error(), fmt.Sprintf("backupstoragelocations.velero.io \"%s\" not found", bsl))
+		assert.ErrorContains(t, e, fmt.Sprintf("backupstoragelocations.velero.io \"%s\" not found", bsl))
 	})
 
 	t.Run("create a backup create command with specific volume-snapshot-locations setting", func(t *testing.T) {

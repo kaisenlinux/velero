@@ -41,22 +41,41 @@ help:  ## Display this help
 
 TOOLS_DIR := $(REPO_ROOT)/hack/tools
 BIN_DIR := bin
+
 # Try to not modify PATH if possible
 GOBIN := $(REPO_ROOT)/.go/bin
+
 TOOLS_BIN_DIR := $(TOOLS_DIR)/$(BIN_DIR)
+
 GINKGO := $(GOBIN)/ginkgo
+
 KUSTOMIZE := $(TOOLS_BIN_DIR)/kustomize
+
 OUTPUT_DIR := _output/$(GOOS)/$(GOARCH)/bin
-GINKGO_FOCUS ?=
-GINKGO_SKIP ?=
-SKIP_STR := $(foreach var, $(subst ., ,$(GINKGO_SKIP)),-skip "$(var)")
-FOCUS_STR := $(foreach var, $(subst ., ,$(GINKGO_FOCUS)),-focus "$(var)")
+
+# Please reference to this document for Ginkgo label spec format.
+# https://onsi.github.io/ginkgo/#spec-labels
+GINKGO_LABELS ?=
+
+# When --fail-fast is set, the entire suite will stop when the first failure occurs.
+# Enable --fail-fast by default.
+# https://onsi.github.io/ginkgo/#mental-model-how-ginkgo-handles-failure
+FAIL_FAST ?= false
+
 VELERO_CLI ?=$$(pwd)/../_output/bin/$(GOOS)/$(GOARCH)/velero
+
 VELERO_IMAGE ?= velero/velero:main
+
 PLUGINS ?=
+
+# Flag used to tell E2E whether the Velero vSphere plugin is installed.
+HAS_VSPHERE_PLUGIN ?= false
+
 RESTORE_HELPER_IMAGE ?=
+
 #Released version only
-UPGRADE_FROM_VELERO_VERSION ?= v1.12.3,v1.13.2
+UPGRADE_FROM_VELERO_VERSION ?= v1.13.2,v1.14.1
+
 # UPGRADE_FROM_VELERO_CLI can has the same format(a list divided by comma) with UPGRADE_FROM_VELERO_VERSION
 # Upgrade tests will be executed sequently according to the list by UPGRADE_FROM_VELERO_VERSION
 # So although length of UPGRADE_FROM_VELERO_CLI list is not equal with UPGRADE_FROM_VELERO_VERSION
@@ -64,7 +83,7 @@ UPGRADE_FROM_VELERO_VERSION ?= v1.12.3,v1.13.2
 # to the end, nil string will be set if UPGRADE_FROM_VELERO_CLI is shorter than UPGRADE_FROM_VELERO_VERSION
 UPGRADE_FROM_VELERO_CLI ?=
 
-MIGRATE_FROM_VELERO_VERSION ?= v1.13.2,self
+MIGRATE_FROM_VELERO_VERSION ?= v1.14.1,self
 MIGRATE_FROM_VELERO_CLI ?=
 
 VELERO_NAMESPACE ?= velero
@@ -94,7 +113,6 @@ ADDITIONAL_BSL_PREFIX ?=
 ADDITIONAL_BSL_CONFIG ?=
 
 FEATURES ?=
-DEBUG_E2E_TEST ?= false
 DEBUG_VELERO_POD_RESTART ?= false
 VELERO_SERVER_DEBUG_MODE ?= false
 
@@ -129,26 +147,27 @@ VELERO_POD_CPU_REQUEST ?= 2
 VELERO_POD_MEM_REQUEST ?= 2Gi
 POD_VOLUME_OPERATION_TIMEOUT ?= 6h
 
-COMMON_ARGS := -velerocli=$(VELERO_CLI) \
-	-velero-image=$(VELERO_IMAGE) \
-	-plugins=$(PLUGINS) \
-	-velero-version=$(VERSION) \
-	-restore-helper-image=$(RESTORE_HELPER_IMAGE) \
-	-velero-namespace=$(VELERO_NAMESPACE) \
-	-credentials-file=$(CREDS_FILE) \
-	-bucket=$(BSL_BUCKET) \
-	-prefix=$(BSL_PREFIX) \
-	-bsl-config=$(BSL_CONFIG) \
-	-vsl-config=$(VSL_CONFIG) \
-	-cloud-provider=$(CLOUD_PROVIDER) \
-	-object-store-provider="$(OBJECT_STORE_PROVIDER)" \
-	-features=$(FEATURES) \
-	-install-velero=$(INSTALL_VELERO) \
-	-registry-credential-file=$(REGISTRY_CREDENTIAL_FILE) \
-	-debug-e2e-test=$(DEBUG_E2E_TEST) \
-	-velero-server-debug-mode=$(VELERO_SERVER_DEBUG_MODE) \
-	-uploader-type=$(UPLOADER_TYPE) \
-	-debug-velero-pod-restart=$(DEBUG_VELERO_POD_RESTART)
+COMMON_ARGS := --velerocli=$(VELERO_CLI) \
+	--velero-image=$(VELERO_IMAGE) \
+	--plugins=$(PLUGINS) \
+	--velero-version=$(VERSION) \
+	--restore-helper-image=$(RESTORE_HELPER_IMAGE) \
+	--velero-namespace=$(VELERO_NAMESPACE) \
+	--credentials-file=$(CREDS_FILE) \
+	--bucket=$(BSL_BUCKET) \
+	--prefix=$(BSL_PREFIX) \
+	--bsl-config=$(BSL_CONFIG) \
+	--vsl-config=$(VSL_CONFIG) \
+	--cloud-provider=$(CLOUD_PROVIDER) \
+	--object-store-provider="$(OBJECT_STORE_PROVIDER)" \
+	--features=$(FEATURES) \
+	--install-velero=$(INSTALL_VELERO) \
+	--registry-credential-file=$(REGISTRY_CREDENTIAL_FILE) \
+	--velero-server-debug-mode=$(VELERO_SERVER_DEBUG_MODE) \
+	--uploader-type=$(UPLOADER_TYPE) \
+	--debug-velero-pod-restart=$(DEBUG_VELERO_POD_RESTART) \
+	--fail-fast=$(FAIL_FAST) \
+	--has-vsphere-plugin=$(HAS_VSPHERE_PLUGIN)
 
 # Make sure ginkgo is in $GOBIN
 .PHONY:ginkgo
@@ -156,7 +175,7 @@ ginkgo: ${GOBIN}/ginkgo
 
 # This target does not run if ginkgo is already in $GOBIN
 ${GOBIN}/ginkgo:
-	GOBIN=${GOBIN} go install github.com/onsi/ginkgo/ginkgo@v1.16.5
+	GOBIN=${GOBIN} go install github.com/onsi/ginkgo/v2/ginkgo@v2.19.0
 
 .PHONY: run-e2e
 run-e2e: ginkgo
@@ -166,31 +185,38 @@ run-e2e: ginkgo
 			(echo "Bucket to store the backups from E2E tests is required, please re-run with BSL_BUCKET=<BucketName>"; exit 1 )
 		@[ "${CLOUD_PROVIDER}" ] && echo "Using cloud provider ${CLOUD_PROVIDER}" || \
 			(echo "Cloud provider for target cloud/plugin provider is required, please rerun with CLOUD_PROVIDER=<aws,azure,kind,vsphere>"; exit 1)
-	@$(GINKGO) -v $(FOCUS_STR) $(SKIP_STR) ./e2e -- $(COMMON_ARGS) \
-		-upgrade-from-velero-cli=$(UPGRADE_FROM_VELERO_CLI) \
-		-upgrade-from-velero-version=$(UPGRADE_FROM_VELERO_VERSION) \
-		-migrate-from-velero-cli=$(MIGRATE_FROM_VELERO_CLI) \
-		-migrate-from-velero-version=$(MIGRATE_FROM_VELERO_VERSION) \
-		-additional-bsl-plugins=$(ADDITIONAL_BSL_PLUGINS) \
-		-additional-bsl-object-store-provider="$(ADDITIONAL_OBJECT_STORE_PROVIDER)" \
-		-additional-bsl-credentials-file=$(ADDITIONAL_CREDS_FILE) \
-		-additional-bsl-bucket=$(ADDITIONAL_BSL_BUCKET) \
-		-additional-bsl-prefix=$(ADDITIONAL_BSL_PREFIX) \
-		-additional-bsl-config=$(ADDITIONAL_BSL_CONFIG) \
-		-default-cluster-context=$(DEFAULT_CLUSTER) \
-		-standby-cluster-context=$(STANDBY_CLUSTER) \
-		-snapshot-move-data=$(SNAPSHOT_MOVE_DATA) \
-		-data-mover-plugin=$(DATA_MOVER_PLUGIN) \
-		-standby-cluster-cloud-provider=$(STANDBY_CLUSTER_CLOUD_PROVIDER) \
-		-standby-cluster-plugins=$(STANDBY_CLUSTER_PLUGINS) \
-		-standby-cluster-object-store-provider=$(STANDBY_CLUSTER_OBJECT_STORE_PROVIDER) \
-		-default-cluster-name=$(DEFAULT_CLUSTER_NAME) \
-		-standby-cluster-name=$(STANDBY_CLUSTER_NAME) \
-		-eks-policy-arn=$(EKS_POLICY_ARN) \
-		-default-cls-service-account-name=$(DEFAULT_CLS_SERVICE_ACCOUNT_NAME) \
-		-standby-cls-service-account-name=$(STANDBY_CLS_SERVICE_ACCOUNT_NAME)
-		-kibishii-directory=$(KIBISHII_DIRECTORY) \
-		-disable-informer-cache=$(DISABLE_INFORMER_CACHE)
+	@$(GINKGO) run \
+		-v \
+		--junit-report e2e/report.xml \
+		--label-filter="$(GINKGO_LABELS)" \
+		--timeout=5h \
+		--fail-fast=$(FAIL_FAST) \
+		./e2e \
+		-- $(COMMON_ARGS) \
+		--upgrade-from-velero-cli=$(UPGRADE_FROM_VELERO_CLI) \
+		--upgrade-from-velero-version=$(UPGRADE_FROM_VELERO_VERSION) \
+		--migrate-from-velero-cli=$(MIGRATE_FROM_VELERO_CLI) \
+		--migrate-from-velero-version=$(MIGRATE_FROM_VELERO_VERSION) \
+		--additional-bsl-plugins=$(ADDITIONAL_BSL_PLUGINS) \
+		--additional-bsl-object-store-provider="$(ADDITIONAL_OBJECT_STORE_PROVIDER)" \
+		--additional-bsl-credentials-file=$(ADDITIONAL_CREDS_FILE) \
+		--additional-bsl-bucket=$(ADDITIONAL_BSL_BUCKET) \
+		--additional-bsl-prefix=$(ADDITIONAL_BSL_PREFIX) \
+		--additional-bsl-config=$(ADDITIONAL_BSL_CONFIG) \
+		--default-cluster-context=$(DEFAULT_CLUSTER) \
+		--standby-cluster-context=$(STANDBY_CLUSTER) \
+		--snapshot-move-data=$(SNAPSHOT_MOVE_DATA) \
+		--data-mover-plugin=$(DATA_MOVER_PLUGIN) \
+		--standby-cluster-cloud-provider=$(STANDBY_CLUSTER_CLOUD_PROVIDER) \
+		--standby-cluster-plugins=$(STANDBY_CLUSTER_PLUGINS) \
+		--standby-cluster-object-store-provider=$(STANDBY_CLUSTER_OBJECT_STORE_PROVIDER) \
+		--default-cluster-name=$(DEFAULT_CLUSTER_NAME) \
+		--standby-cluster-name=$(STANDBY_CLUSTER_NAME) \
+		--eks-policy-arn=$(EKS_POLICY_ARN) \
+		--default-cls-service-account-name=$(DEFAULT_CLS_SERVICE_ACCOUNT_NAME) \
+		--standby-cls-service-account-name=$(STANDBY_CLS_SERVICE_ACCOUNT_NAME) \
+		--kibishii-directory=$(KIBISHII_DIRECTORY) \
+		--disable-informer-cache=$(DISABLE_INFORMER_CACHE)
 
 .PHONY: run-perf
 run-perf: ginkgo
@@ -200,20 +226,27 @@ run-perf: ginkgo
 			(echo "Bucket to store the backups from E2E tests is required, please re-run with BSL_BUCKET=<BucketName>"; exit 1 )
 		@[ "${CLOUD_PROVIDER}" ] && echo "Using cloud provider ${CLOUD_PROVIDER}" || \
 			(echo "Cloud provider for target cloud/plugin provider is required, please rerun with CLOUD_PROVIDER=<aws,azure,kind,vsphere>"; exit 1)
-	@$(GINKGO) -v $(FOCUS_STR) $(SKIP_STR) ./perf -- $(COMMON_ARGS) \
-		-nfs-server-path=$(NFS_SERVER_PATH) \
-		-test-case-describe=$(TEST_CASE_DESCRIBE) \
-		-backup-for-restore=$(BACKUP_FOR_RESTORE) \
-		-delete-cluster-resource=$(Delete_Cluster_Resource) \
-		-node-agent-pod-cpu-limit=$(NODE_AGENT_POD_CPU_LIMIT) \
-		-node-agent-pod-mem-limit=$(NODE_AGENT_POD_MEM_LIMIT) \
-		-node-agent-pod-cpu-request=$(NODE_AGENT_POD_CPU_REQUEST) \
-		-node-agent-pod-mem-request=$(NODE_AGENT_POD_MEM_REQUEST) \
-		-velero-pod-cpu-limit=$(VELERO_POD_CPU_LIMIT) \
-		-velero-pod-mem-limit=$(VELERO_POD_MEM_LIMIT) \
-		-velero-pod-cpu-request=$(VELERO_POD_CPU_REQUEST) \
-		-velero-pod-mem-request=$(VELERO_POD_MEM_REQUEST) \
-		-pod-volume-operation-timeout=$(POD_VOLUME_OPERATION_TIMEOUT)
+	@$(GINKGO) run \
+		-v \
+		--junit-report perf/report.xml \
+		--label-filter="$(GINKGO_LABELS)" \
+		--timeout=5h \
+		--fail-fast=$(FAIL_FAST) \
+		./perf \
+		-- $(COMMON_ARGS) \
+		--nfs-server-path=$(NFS_SERVER_PATH) \
+		--test-case-describe=$(TEST_CASE_DESCRIBE) \
+		--backup-for-restore=$(BACKUP_FOR_RESTORE) \
+		--delete-cluster-resource=$(Delete_Cluster_Resource) \
+		--node-agent-pod-cpu-limit=$(NODE_AGENT_POD_CPU_LIMIT) \
+		--node-agent-pod-mem-limit=$(NODE_AGENT_POD_MEM_LIMIT) \
+		--node-agent-pod-cpu-request=$(NODE_AGENT_POD_CPU_REQUEST) \
+		--node-agent-pod-mem-request=$(NODE_AGENT_POD_MEM_REQUEST) \
+		--velero-pod-cpu-limit=$(VELERO_POD_CPU_LIMIT) \
+		--velero-pod-mem-limit=$(VELERO_POD_MEM_LIMIT) \
+		--velero-pod-cpu-request=$(VELERO_POD_CPU_REQUEST) \
+		--velero-pod-mem-request=$(VELERO_POD_MEM_REQUEST) \
+		--pod-volume-operation-timeout=$(POD_VOLUME_OPERATION_TIMEOUT)
 
 build: ginkgo
 	mkdir -p $(OUTPUT_DIR)

@@ -57,6 +57,7 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/podvolume"
 	uploadermocks "github.com/vmware-tanzu/velero/pkg/podvolume/mocks"
 	"github.com/vmware-tanzu/velero/pkg/test"
+	"github.com/vmware-tanzu/velero/pkg/types"
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 	. "github.com/vmware-tanzu/velero/pkg/util/results"
 )
@@ -870,7 +871,7 @@ func TestRestoreResourcePriorities(t *testing.T) {
 		backup             *velerov1api.Backup
 		apiResources       []*test.APIResource
 		tarball            io.Reader
-		resourcePriorities Priorities
+		resourcePriorities types.Priorities
 	}{
 		{
 			name:    "resources are restored according to the specified resource priorities",
@@ -904,7 +905,7 @@ func TestRestoreResourcePriorities(t *testing.T) {
 				test.Deployments(),
 				test.ServiceAccounts(),
 			},
-			resourcePriorities: Priorities{
+			resourcePriorities: types.Priorities{
 				HighPriorities: []string{"persistentvolumes", "persistentvolumeclaims", "serviceaccounts"},
 				LowPriorities:  []string{"deployments.apps"},
 			},
@@ -2316,11 +2317,11 @@ func TestShouldRestore(t *testing.T) {
 			res, err := ctx.shouldRestore(tc.pvName, pvClient)
 			assert.Equal(t, tc.want, res)
 			if tc.wantErr != nil {
-				if assert.NotNil(t, err, "expected a non-nil error") {
+				if assert.Error(t, err, "expected a non-nil error") {
 					assert.EqualError(t, err, tc.wantErr.Error())
 				}
 			} else {
-				assert.Nil(t, err)
+				assert.NoError(t, err)
 			}
 		})
 	}
@@ -3192,7 +3193,7 @@ func TestRestorePersistentVolumes(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
-			h.restorer.resourcePriorities = Priorities{HighPriorities: []string{"persistentvolumes", "persistentvolumeclaims"}}
+			h.restorer.resourcePriorities = types.Priorities{HighPriorities: []string{"persistentvolumes", "persistentvolumeclaims"}}
 			h.restorer.pvRenamer = func(oldName string) (string, error) {
 				renamed := "renamed-" + oldName
 				return renamed, nil
@@ -3519,19 +3520,19 @@ func TestIsCompleted(t *testing.T) {
 func Test_getOrderedResources(t *testing.T) {
 	tests := []struct {
 		name               string
-		resourcePriorities Priorities
+		resourcePriorities types.Priorities
 		backupResources    map[string]*archive.ResourceItems
 		want               []string
 	}{
 		{
 			name:               "when only priorities are specified, they're returned in order",
-			resourcePriorities: Priorities{HighPriorities: []string{"prio-3", "prio-2", "prio-1"}},
+			resourcePriorities: types.Priorities{HighPriorities: []string{"prio-3", "prio-2", "prio-1"}},
 			backupResources:    nil,
 			want:               []string{"prio-3", "prio-2", "prio-1"},
 		},
 		{
 			name:               "when only backup resources are specified, they're returned in alphabetical order",
-			resourcePriorities: Priorities{},
+			resourcePriorities: types.Priorities{},
 			backupResources: map[string]*archive.ResourceItems{
 				"backup-resource-3": nil,
 				"backup-resource-2": nil,
@@ -3541,7 +3542,7 @@ func Test_getOrderedResources(t *testing.T) {
 		},
 		{
 			name:               "when priorities and backup resources are specified, they're returned in the correct order",
-			resourcePriorities: Priorities{HighPriorities: []string{"prio-3", "prio-2", "prio-1"}},
+			resourcePriorities: types.Priorities{HighPriorities: []string{"prio-3", "prio-2", "prio-1"}},
 			backupResources: map[string]*archive.ResourceItems{
 				"prio-3":            nil,
 				"backup-resource-3": nil,
@@ -3552,7 +3553,7 @@ func Test_getOrderedResources(t *testing.T) {
 		},
 		{
 			name:               "when priorities and backup resources are specified, they're returned in the correct order",
-			resourcePriorities: Priorities{HighPriorities: []string{"prio-3", "prio-2", "prio-1"}, LowPriorities: []string{"prio-0"}},
+			resourcePriorities: types.Priorities{HighPriorities: []string{"prio-3", "prio-2", "prio-1"}, LowPriorities: []string{"prio-0"}},
 			backupResources: map[string]*archive.ResourceItems{
 				"prio-3":            nil,
 				"prio-0":            nil,
@@ -3575,6 +3576,7 @@ func Test_getOrderedResources(t *testing.T) {
 // order. Any resources *not* in resourcePriorities are required to come *after* all
 // resources in any order.
 func assertResourceCreationOrder(t *testing.T, resourcePriorities []string, createdResources []resourceID) {
+	t.Helper()
 	// lastSeen tracks the index in 'resourcePriorities' of the last resource type
 	// we saw created. Once we've seen a resource in 'resourcePriorities', we should
 	// never see another instance of a prior resource.
@@ -3598,7 +3600,7 @@ func assertResourceCreationOrder(t *testing.T, resourcePriorities []string, crea
 
 		// the index of the current resource must be the same as or greater than the index of
 		// the last resource we saw for the restored order to be correct.
-		assert.True(t, current >= lastSeen, "%s was restored out of order", r.groupResource)
+		assert.GreaterOrEqual(t, current, lastSeen, "%s was restored out of order", r.groupResource)
 		lastSeen = current
 	}
 }
@@ -3678,7 +3680,7 @@ func assertNonEmptyResults(t *testing.T, typeMsg string, res ...Result) {
 		total += len(r.Namespaces)
 		total += len(r.Velero)
 	}
-	assert.Greater(t, total, 0, "Expected at least one "+typeMsg)
+	assert.Positive(t, total, "Expected at least one "+typeMsg)
 }
 
 type harness struct {
@@ -3963,11 +3965,33 @@ func TestHasCSIVolumeSnapshot(t *testing.T) {
 						"namespace": "default",
 						"name":      "test",
 					},
+					"spec": map[string]interface{}{
+						"claimRef": map[string]interface{}{
+							"namespace": "velero",
+							"name":      "test",
+						},
+					},
 				},
 			},
 			vs:             builder.ForVolumeSnapshot("velero", "test").Result(),
 			expectedResult: false,
 		},
+		{
+			name: "PVs claimref is nil, expect false.",
+			obj: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"kind":       "PersistentVolume",
+					"apiVersion": "v1",
+					"metadata": map[string]interface{}{
+						"namespace": "velero",
+						"name":      "test",
+					},
+				},
+			},
+			vs:             builder.ForVolumeSnapshot("velero", "test").SourcePVC("test").Result(),
+			expectedResult: false,
+		},
+
 		{
 			name: "Find VS, expect true.",
 			obj: &unstructured.Unstructured{

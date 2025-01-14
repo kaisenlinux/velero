@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	. "github.com/vmware-tanzu/velero/test"
@@ -97,7 +97,9 @@ func BackupRestoreTest(backupRestoreTestConfig BackupRestoreTestConfig) {
 	})
 
 	AfterEach(func() {
-		if !veleroCfg.Debug {
+		if CurrentSpecReport().Failed() && veleroCfg.FailFast {
+			fmt.Println("Test case failed and fail fast is enabled. Skip resource clean up.")
+		} else {
 			By("Clean backups after test", func() {
 				DeleteAllBackups(context.Background(), &veleroCfg)
 				if backupRestoreTestConfig.isRetainPVTest {
@@ -108,7 +110,7 @@ func BackupRestoreTest(backupRestoreTestConfig BackupRestoreTestConfig) {
 			if InstallVelero {
 				ctx, ctxCancel := context.WithTimeout(context.Background(), time.Minute*5)
 				defer ctxCancel()
-				err = VeleroUninstall(ctx, veleroCfg.VeleroCLI, veleroCfg.VeleroNamespace)
+				err = VeleroUninstall(ctx, veleroCfg)
 				Expect(err).To(Succeed())
 			}
 		}
@@ -195,9 +197,9 @@ func BackupRestoreTest(backupRestoreTestConfig BackupRestoreTestConfig) {
 				secretKey,
 			)).To(Succeed())
 
-			bsls := []string{"default", additionalBsl}
+			BSLs := []string{"default", additionalBsl}
 
-			for _, bsl := range bsls {
+			for _, bsl := range BSLs {
 				backupName = fmt.Sprintf("backup-%s", bsl)
 				restoreName = fmt.Sprintf("restore-%s", bsl)
 				// We limit the length of backup name here to avoid the issue of vsphere plugin https://github.com/vmware-tanzu/velero-plugin-for-vsphere/issues/370
@@ -207,8 +209,8 @@ func BackupRestoreTest(backupRestoreTestConfig BackupRestoreTestConfig) {
 					restoreName = fmt.Sprintf("%s-%s", restoreName, UUIDgen)
 				}
 				veleroCfg.ProvideSnapshotsVolumeParam = !provideSnapshotVolumesParmInBackup
-				workloadNmespace := kibishiiNamespace + bsl
-				Expect(RunKibishiiTests(veleroCfg, backupName, restoreName, bsl, workloadNmespace, useVolumeSnapshots, !useVolumeSnapshots)).To(Succeed(),
+				workloadNS := kibishiiNamespace + bsl
+				Expect(RunKibishiiTests(veleroCfg, backupName, restoreName, bsl, workloadNS, useVolumeSnapshots, !useVolumeSnapshots)).To(Succeed(),
 					"Failed to successfully backup and restore Kibishii namespace using BSL %s", bsl)
 			}
 		})

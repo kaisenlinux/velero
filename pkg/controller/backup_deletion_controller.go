@@ -40,6 +40,7 @@ import (
 	"github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	velerov2alpha1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
+	"github.com/vmware-tanzu/velero/pkg/constant"
 	"github.com/vmware-tanzu/velero/pkg/discovery"
 	"github.com/vmware-tanzu/velero/pkg/label"
 	"github.com/vmware-tanzu/velero/pkg/metrics"
@@ -48,6 +49,8 @@ import (
 	vsv1 "github.com/vmware-tanzu/velero/pkg/plugin/velero/volumesnapshotter/v1"
 	"github.com/vmware-tanzu/velero/pkg/podvolume"
 	"github.com/vmware-tanzu/velero/pkg/repository"
+	repomanager "github.com/vmware-tanzu/velero/pkg/repository/manager"
+	repotypes "github.com/vmware-tanzu/velero/pkg/repository/types"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
 	"github.com/vmware-tanzu/velero/pkg/util/filesystem"
 	"github.com/vmware-tanzu/velero/pkg/util/kube"
@@ -61,7 +64,7 @@ type backupDeletionReconciler struct {
 	client.Client
 	logger            logrus.FieldLogger
 	backupTracker     BackupTracker
-	repoMgr           repository.Manager
+	repoMgr           repomanager.Manager
 	metrics           *metrics.ServerMetrics
 	clock             clock.Clock
 	discoveryHelper   discovery.Helper
@@ -76,7 +79,7 @@ func NewBackupDeletionReconciler(
 	logger logrus.FieldLogger,
 	client client.Client,
 	backupTracker BackupTracker,
-	repoMgr repository.Manager,
+	repoMgr repomanager.Manager,
 	metrics *metrics.ServerMetrics,
 	helper discovery.Helper,
 	newPluginManager func(logrus.FieldLogger) clientmgmt.Manager,
@@ -101,7 +104,7 @@ func NewBackupDeletionReconciler(
 
 func (r *backupDeletionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Make sure the expired requests can be deleted eventually
-	s := kube.NewPeriodicalEnqueueSource(r.logger, mgr.GetClient(), &velerov1api.DeleteBackupRequestList{}, time.Hour, kube.PeriodicalEnqueueSourceOption{})
+	s := kube.NewPeriodicalEnqueueSource(r.logger.WithField("controller", constant.ControllerBackupDeletion), mgr.GetClient(), &velerov1api.DeleteBackupRequestList{}, time.Hour, kube.PeriodicalEnqueueSourceOption{})
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&velerov1api.DeleteBackupRequest{}).
 		WatchesRawSource(s, nil).
@@ -114,7 +117,7 @@ func (r *backupDeletionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.logger.WithFields(logrus.Fields{
-		"controller":          BackupDeletion,
+		"controller":          constant.ControllerBackupDeletion,
 		"deletebackuprequest": req.String(),
 	})
 	log.Debug("Getting deletebackuprequest")
@@ -146,10 +149,7 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Make sure we have the backup name
 	if dbr.Spec.BackupName == "" {
-		_, err := r.patchDeleteBackupRequest(ctx, dbr, func(res *velerov1api.DeleteBackupRequest) {
-			res.Status.Phase = velerov1api.DeleteBackupRequestPhaseProcessed
-			res.Status.Errors = []string{"spec.backupName is required"}
-		})
+		err := r.patchDeleteBackupRequestWithError(ctx, dbr, errors.New("spec.backupName is required"))
 		return ctrl.Result{}, err
 	}
 
@@ -163,10 +163,7 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Don't allow deleting an in-progress backup
 	if r.backupTracker.Contains(dbr.Namespace, dbr.Spec.BackupName) {
-		_, err := r.patchDeleteBackupRequest(ctx, dbr, func(r *velerov1api.DeleteBackupRequest) {
-			r.Status.Phase = velerov1api.DeleteBackupRequestPhaseProcessed
-			r.Status.Errors = []string{"backup is still in progress"}
-		})
+		err := r.patchDeleteBackupRequestWithError(ctx, dbr, errors.New("backup is still in progress"))
 		return ctrl.Result{}, err
 	}
 
@@ -177,10 +174,7 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		Name:      dbr.Spec.BackupName,
 	}, backup); apierrors.IsNotFound(err) {
 		// Couldn't find backup - update status to Processed and record the not-found error
-		_, err = r.patchDeleteBackupRequest(ctx, dbr, func(r *velerov1api.DeleteBackupRequest) {
-			r.Status.Phase = velerov1api.DeleteBackupRequestPhaseProcessed
-			r.Status.Errors = []string{"backup not found"}
-		})
+		err = r.patchDeleteBackupRequestWithError(ctx, dbr, errors.New("backup not found"))
 		return ctrl.Result{}, err
 	} else if err != nil {
 		return ctrl.Result{}, errors.Wrap(err, "error getting backup")
@@ -193,20 +187,14 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		Name:      backup.Spec.StorageLocation,
 	}, location); err != nil {
 		if apierrors.IsNotFound(err) {
-			_, err := r.patchDeleteBackupRequest(ctx, dbr, func(r *velerov1api.DeleteBackupRequest) {
-				r.Status.Phase = velerov1api.DeleteBackupRequestPhaseProcessed
-				r.Status.Errors = append(r.Status.Errors, fmt.Sprintf("backup storage location %s not found", backup.Spec.StorageLocation))
-			})
+			err := r.patchDeleteBackupRequestWithError(ctx, dbr, fmt.Errorf("backup storage location %s not found", backup.Spec.StorageLocation))
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, errors.Wrap(err, "error getting backup storage location")
 	}
 
 	if location.Spec.AccessMode == velerov1api.BackupStorageLocationAccessModeReadOnly {
-		_, err := r.patchDeleteBackupRequest(ctx, dbr, func(r *velerov1api.DeleteBackupRequest) {
-			r.Status.Phase = velerov1api.DeleteBackupRequestPhaseProcessed
-			r.Status.Errors = append(r.Status.Errors, fmt.Sprintf("cannot delete backup because backup storage location %s is currently in read-only mode", location.Name))
-		})
+		err := r.patchDeleteBackupRequestWithError(ctx, dbr, fmt.Errorf("cannot delete backup because backup storage location %s is currently in read-only mode", location.Name))
 		return ctrl.Result{}, err
 	}
 
@@ -236,8 +224,9 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		b.Status.Phase = velerov1api.BackupPhaseDeleting
 	})
 	if err != nil {
-		log.WithError(errors.WithStack(err)).Error("Error setting backup phase to deleting")
-		return ctrl.Result{}, err
+		log.WithError(err).Error("Error setting backup phase to deleting")
+		err2 := r.patchDeleteBackupRequestWithError(ctx, dbr, errors.Wrap(err, "error setting backup phase to deleting"))
+		return ctrl.Result{}, err2
 	}
 
 	backupScheduleName := backup.GetLabels()[velerov1api.ScheduleNameLabel]
@@ -248,13 +237,17 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	backupStore, err := r.backupStoreGetter.Get(location, pluginManager, log)
 	if err != nil {
-		return ctrl.Result{}, errors.Wrap(err, "error getting the backup store")
+		log.WithError(err).Error("Error getting the backup store")
+		err2 := r.patchDeleteBackupRequestWithError(ctx, dbr, errors.Wrap(err, "error getting the backup store"))
+		return ctrl.Result{}, err2
 	}
 
 	actions, err := pluginManager.GetDeleteItemActions()
 	log.Debugf("%d actions before invoking actions", len(actions))
 	if err != nil {
-		return ctrl.Result{}, errors.Wrap(err, "error getting delete item actions")
+		log.WithError(err).Error("Error getting delete item actions")
+		err2 := r.patchDeleteBackupRequestWithError(ctx, dbr, errors.New("error getting delete item actions"))
+		return ctrl.Result{}, err2
 	}
 	// don't defer CleanupClients here, since it was already called above.
 
@@ -266,7 +259,7 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			log.WithError(err).Errorf("Unable to download tarball for backup %s, skipping associated DeleteItemAction plugins", backup.Name)
 		} else {
 			defer closeAndRemoveFile(backupFile, r.logger)
-			ctx := &delete.Context{
+			deleteCtx := &delete.Context{
 				Backup:          backup,
 				BackupReader:    backupFile,
 				Actions:         actions,
@@ -277,9 +270,11 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 			// Optimization: wrap in a gofunc? Would be useful for large backups with lots of objects.
 			// but what do we do with the error returned? We can't just swallow it as that may lead to dangling resources.
-			err = delete.InvokeDeleteActions(ctx)
+			err = delete.InvokeDeleteActions(deleteCtx)
 			if err != nil {
-				return ctrl.Result{}, errors.Wrap(err, "error invoking delete item actions")
+				log.WithError(err).Error("Error invoking delete item actions")
+				err2 := r.patchDeleteBackupRequestWithError(ctx, dbr, errors.New("error invoking delete item actions"))
+				return ctrl.Result{}, err2
 			}
 		}
 	}
@@ -531,7 +526,7 @@ func (r *backupDeletionReconciler) deleteMovedSnapshots(ctx context.Context, bac
 		return []error{errors.Wrapf(err, "failed to retrieve config for snapshot info")}
 	}
 	var errs []error
-	directSnapshots := map[string][]repository.SnapshotIdentifier{}
+	directSnapshots := map[string][]repotypes.SnapshotIdentifier{}
 	for i := range list.Items {
 		cm := list.Items[i]
 		if cm.Data == nil || len(cm.Data) == 0 {
@@ -545,7 +540,7 @@ func (r *backupDeletionReconciler) deleteMovedSnapshots(ctx context.Context, bac
 			continue
 		}
 
-		snapshot := repository.SnapshotIdentifier{}
+		snapshot := repotypes.SnapshotIdentifier{}
 		if err := json.Unmarshal(b, &snapshot); err != nil {
 			errs = append(errs, errors.Wrapf(err, "failed to unmarshal snapshot info"))
 			continue
@@ -557,7 +552,7 @@ func (r *backupDeletionReconciler) deleteMovedSnapshots(ctx context.Context, bac
 		}
 
 		if directSnapshots[snapshot.VolumeNamespace] == nil {
-			directSnapshots[snapshot.VolumeNamespace] = []repository.SnapshotIdentifier{}
+			directSnapshots[snapshot.VolumeNamespace] = []repotypes.SnapshotIdentifier{}
 		}
 
 		directSnapshots[snapshot.VolumeNamespace] = append(directSnapshots[snapshot.VolumeNamespace], snapshot)
@@ -589,6 +584,14 @@ func (r *backupDeletionReconciler) patchDeleteBackupRequest(ctx context.Context,
 	return req, nil
 }
 
+func (r *backupDeletionReconciler) patchDeleteBackupRequestWithError(ctx context.Context, req *velerov1api.DeleteBackupRequest, err error) error {
+	_, err = r.patchDeleteBackupRequest(ctx, req, func(r *velerov1api.DeleteBackupRequest) {
+		r.Status.Phase = velerov1api.DeleteBackupRequestPhaseProcessed
+		r.Status.Errors = []string{err.Error()}
+	})
+	return err
+}
+
 func (r *backupDeletionReconciler) patchBackup(ctx context.Context, backup *velerov1api.Backup, mutate func(*velerov1api.Backup)) (*velerov1api.Backup, error) {
 	//TODO: The patchHelper can't be used here because the `backup/xxx/status` does not exist, until the backup resource is refactored
 
@@ -617,7 +620,7 @@ func (r *backupDeletionReconciler) patchBackup(ctx context.Context, backup *vele
 
 // getSnapshotsInBackup returns a list of all pod volume snapshot ids associated with
 // a given Velero backup.
-func getSnapshotsInBackup(ctx context.Context, backup *velerov1api.Backup, kbClient client.Client) (map[string][]repository.SnapshotIdentifier, error) {
+func getSnapshotsInBackup(ctx context.Context, backup *velerov1api.Backup, kbClient client.Client) (map[string][]repotypes.SnapshotIdentifier, error) {
 	podVolumeBackups := &velerov1api.PodVolumeBackupList{}
 	options := &client.ListOptions{
 		LabelSelector: labels.Set(map[string]string{
@@ -633,8 +636,8 @@ func getSnapshotsInBackup(ctx context.Context, backup *velerov1api.Backup, kbCli
 	return podvolume.GetSnapshotIdentifier(podVolumeBackups), nil
 }
 
-func batchDeleteSnapshots(ctx context.Context, repoEnsurer *repository.Ensurer, repoMgr repository.Manager,
-	directSnapshots map[string][]repository.SnapshotIdentifier, backup *velerov1api.Backup, logger logrus.FieldLogger) []error {
+func batchDeleteSnapshots(ctx context.Context, repoEnsurer *repository.Ensurer, repoMgr repomanager.Manager,
+	directSnapshots map[string][]repotypes.SnapshotIdentifier, backup *velerov1api.Backup, logger logrus.FieldLogger) []error {
 	var errs []error
 	for volumeNamespace, snapshots := range directSnapshots {
 		batchForget := []string{}

@@ -1,9 +1,14 @@
+velero (1.15.1-1kaisen) kaisen-packages; urgency=medium
+
+  * Import the 1.15.1 release
+  * Update the quilt patch
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Tue, 14 Jan 2025 14:21:56 +0200
+
 velero (1.14.0-1kaisen) kaisen-packages; urgency=medium
 
   * Import the 1.14.0 release
   * Update the quilt patch
-  * Bump the Standards-Version
-  * Bump the golang-go version required to build
 
  -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Sun, 18 Aug 2024 00:48:51 +0200
 

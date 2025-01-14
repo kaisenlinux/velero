@@ -41,9 +41,10 @@ const (
 	waitInternal = 2 * time.Second
 )
 
-// DeletePVAndPVCIfAny deletes PVC and delete the bound PV if it exists and log an error when the deletion fails
-// We first set the reclaim policy of the PV to Delete, then PV will be deleted automatically when PVC is deleted.
-func DeletePVAndPVCIfAny(ctx context.Context, client corev1client.CoreV1Interface, pvcName, pvcNamespace string, log logrus.FieldLogger) {
+// DeletePVAndPVCIfAny deletes PVC and delete the bound PV if it exists and log an error when the deletion fails.
+// It first sets the reclaim policy of the PV to Delete, then PV will be deleted automatically when PVC is deleted.
+// If ensureTimeout is not 0, it waits until the PVC is deleted or timeout.
+func DeletePVAndPVCIfAny(ctx context.Context, client corev1client.CoreV1Interface, pvcName, pvcNamespace string, ensureTimeout time.Duration, log logrus.FieldLogger) {
 	pvcObj, err := client.PersistentVolumeClaims(pvcNamespace).Get(ctx, pvcName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -69,7 +70,7 @@ func DeletePVAndPVCIfAny(ctx context.Context, client corev1client.CoreV1Interfac
 		}
 	}
 
-	if err := client.PersistentVolumeClaims(pvcNamespace).Delete(ctx, pvcName, metav1.DeleteOptions{}); err != nil {
+	if err := EnsureDeletePVC(ctx, client, pvcName, pvcNamespace, ensureTimeout); err != nil {
 		log.Warnf("failed to delete pvc %s/%s with err %v", pvcNamespace, pvcName, err)
 	}
 }
@@ -118,10 +119,15 @@ func DeletePVIfAny(ctx context.Context, pvGetter corev1client.CoreV1Interface, p
 }
 
 // EnsureDeletePVC asserts the existence of a PVC by name, deletes it and waits for its disappearance and returns errors on any failure
+// If timeout is 0, it doesn't wait and return nil
 func EnsureDeletePVC(ctx context.Context, pvcGetter corev1client.CoreV1Interface, pvc string, namespace string, timeout time.Duration) error {
 	err := pvcGetter.PersistentVolumeClaims(namespace).Delete(ctx, pvc, metav1.DeleteOptions{})
 	if err != nil {
 		return errors.Wrapf(err, "error to delete pvc %s", pvc)
+	}
+
+	if timeout == 0 {
+		return nil
 	}
 
 	err = wait.PollUntilContextTimeout(ctx, waitInternal, timeout, true, func(ctx context.Context) (bool, error) {
@@ -138,7 +144,7 @@ func EnsureDeletePVC(ctx context.Context, pvcGetter corev1client.CoreV1Interface
 	})
 
 	if err != nil {
-		return errors.Wrapf(err, "error to retrieve pvc info for %s", pvc)
+		return errors.Wrapf(err, "error to ensure pvc deleted for %s", pvc)
 	}
 
 	return nil
@@ -340,23 +346,25 @@ func IsPVCBound(pvc *corev1api.PersistentVolumeClaim) bool {
 }
 
 // MakePodPVCAttachment returns the volume mounts and devices for a pod needed to attach a PVC
-func MakePodPVCAttachment(volumeName string, volumeMode *corev1api.PersistentVolumeMode) ([]corev1api.VolumeMount, []corev1api.VolumeDevice) {
+func MakePodPVCAttachment(volumeName string, volumeMode *corev1api.PersistentVolumeMode, readOnly bool) ([]corev1api.VolumeMount, []corev1api.VolumeDevice, string) {
 	var volumeMounts []corev1api.VolumeMount = nil
 	var volumeDevices []corev1api.VolumeDevice = nil
+	volumePath := "/" + volumeName
 
 	if volumeMode != nil && *volumeMode == corev1api.PersistentVolumeBlock {
 		volumeDevices = []corev1api.VolumeDevice{{
 			Name:       volumeName,
-			DevicePath: "/" + volumeName,
+			DevicePath: volumePath,
 		}}
 	} else {
 		volumeMounts = []corev1api.VolumeMount{{
 			Name:      volumeName,
-			MountPath: "/" + volumeName,
+			MountPath: volumePath,
+			ReadOnly:  readOnly,
 		}}
 	}
 
-	return volumeMounts, volumeDevices
+	return volumeMounts, volumeDevices, volumePath
 }
 
 func GetPVForPVC(
@@ -403,4 +411,13 @@ func GetPVCForPodVolume(vol *corev1api.Volume, pod *corev1api.Pod, crClient crcl
 	}
 
 	return pvc, nil
+}
+
+func DiagnosePVC(pvc *corev1api.PersistentVolumeClaim) string {
+	return fmt.Sprintf("PVC %s/%s, phase %s, binding to %s\n", pvc.Namespace, pvc.Name, pvc.Status.Phase, pvc.Spec.VolumeName)
+}
+
+func DiagnosePV(pv *corev1api.PersistentVolume) string {
+	diag := fmt.Sprintf("PV %s, phase %s, reason %s, message %s\n", pv.Name, pv.Status.Phase, pv.Status.Reason, pv.Status.Message)
+	return diag
 }

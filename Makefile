@@ -74,17 +74,17 @@ else
 	GCR_IMAGE_TAGS ?= $(GCR_IMAGE):$(VERSION)
 endif
 
-# check buildx is enabled
+# check buildx is enabled only if docker is in path
 # macOS/Windows docker cli without Docker Desktop license: https://github.com/abiosoft/colima
 # To add buildx to docker cli: https://github.com/abiosoft/colima/discussions/273#discussioncomment-2684502
-ifeq ($(shell docker buildx inspect 2>/dev/null | awk '/Status/ { print $$2 }'), running)
+ifeq ($(shell which docker 2>/dev/null 1>&2 && docker buildx inspect 2>/dev/null | awk '/Status/ { print $$2 }'), running)
 	BUILDX_ENABLED ?= true
 # if emulated docker cli from podman, assume enabled
 # emulated docker cli from podman: https://podman-desktop.io/docs/migrating-from-docker/emulating-docker-cli-with-podman
 # podman known issues:
 # - on remote podman, such as on macOS,
 #   --output issue: https://github.com/containers/podman/issues/15922
-else ifeq ($(shell cat $(shell which docker) | grep -c "exec podman"), 1)
+else ifeq ($(shell which docker 2>/dev/null 1>&2 && cat $(shell which docker) | grep -c "exec podman"), 1)
 	BUILDX_ENABLED ?= true
 else
 	BUILDX_ENABLED ?= false
@@ -378,3 +378,21 @@ test-perf: local
 
 go-generate:
 	go generate ./pkg/...
+
+# requires an authenticated gh cli
+# gh: https://cli.github.com/
+# First create a PR
+# gh pr create --title 'Title name' --body 'PR body'
+# by default uses PR title as changelog body but can be overwritten like so
+# make new-changelog CHANGELOG_BODY="Changes you have made"
+new-changelog: GH_LOGIN ?= $(shell gh pr view --json author --jq .author.login 2> /dev/null)
+new-changelog: GH_PR_NUMBER ?= $(shell gh pr view --json number --jq .number 2> /dev/null)
+new-changelog: CHANGELOG_BODY ?= "$(shell gh pr view --json title --jq .title)"
+new-changelog:
+	@if [ "$(GH_LOGIN)" = "" ]; then \
+		echo "branch does not have PR or cli not logged in, try 'gh auth login' or 'gh pr create'"; \
+		exit 1; \
+	fi
+	@mkdir -p ./changelogs/unreleased/ && \
+	echo $(CHANGELOG_BODY) > ./changelogs/unreleased/$(GH_PR_NUMBER)-$(GH_LOGIN) && \
+	echo "\"$(CHANGELOG_BODY)\" added to ./changelogs/unreleased/$(GH_PR_NUMBER)-$(GH_LOGIN)"

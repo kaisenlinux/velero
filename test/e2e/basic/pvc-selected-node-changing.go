@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
@@ -66,14 +66,6 @@ func (p *PVCSelectedNodeChanging) CreateResources() error {
 	By(fmt.Sprintf("Create namespace %s", p.namespace), func() {
 		Expect(CreateNamespace(p.Ctx, p.Client, p.namespace)).To(Succeed(),
 			fmt.Sprintf("Failed to create namespace %s", p.namespace))
-	})
-
-	By(fmt.Sprintf("Create a storage class %s.", StorageClassName), func() {
-		Expect(InstallStorageClass(context.Background(), fmt.Sprintf("../testdata/storage-class/%s.yaml", p.VeleroCfg.CloudProvider))).To(Succeed())
-	})
-
-	By(fmt.Sprintf("Create a storage class %s.", StorageClassName), func() {
-		Expect(InstallTestStorageClasses(fmt.Sprintf("../testdata/storage-class/%s.yaml", p.VeleroCfg.CloudProvider))).To(Succeed(), "Failed to install storage class")
 	})
 
 	By(fmt.Sprintf("Create pod %s in namespace %s", p.podName, p.namespace), func() {
@@ -149,11 +141,14 @@ func (p *PVCSelectedNodeChanging) Verify() error {
 }
 
 func (p *PVCSelectedNodeChanging) Clean() error {
-	if !p.VeleroCfg.Debug {
+	if CurrentSpecReport().Failed() && p.VeleroCfg.FailFast {
+		fmt.Println("Test case failed and fail fast is enabled. Skip resource clean up.")
+	} else {
 		p.TestCase.Clean()
 		By(fmt.Sprintf("Clean namespace with prefix %s after test", p.mappedNS), func() {
 			CleanupNamespaces(p.Ctx, p.Client, p.mappedNS)
 		})
 	}
+
 	return nil
 }

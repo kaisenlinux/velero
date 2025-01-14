@@ -51,7 +51,7 @@ func TestIsHostPathVolume(t *testing.T) {
 		},
 	}
 	isHostPath, err := isHostPathVolume(vol, nil, nil)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.True(t, isHostPath)
 
 	// non-hostPath pod volume
@@ -61,7 +61,7 @@ func TestIsHostPathVolume(t *testing.T) {
 		},
 	}
 	isHostPath, err = isHostPathVolume(vol, nil, nil)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.False(t, isHostPath)
 
 	// PVC that doesn't have a PV
@@ -79,7 +79,7 @@ func TestIsHostPathVolume(t *testing.T) {
 		},
 	}
 	isHostPath, err = isHostPathVolume(vol, pvc, nil)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.False(t, isHostPath)
 
 	// PVC that claims a non-hostPath PV
@@ -107,7 +107,7 @@ func TestIsHostPathVolume(t *testing.T) {
 	}
 	crClient1 := velerotest.NewFakeControllerRuntimeClient(t, pv)
 	isHostPath, err = isHostPathVolume(vol, pvc, crClient1)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.False(t, isHostPath)
 
 	// PVC that claims a hostPath PV
@@ -140,7 +140,7 @@ func TestIsHostPathVolume(t *testing.T) {
 	crClient2 := velerotest.NewFakeControllerRuntimeClient(t, pv)
 
 	isHostPath, err = isHostPathVolume(vol, pvc, crClient2)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.True(t, isHostPath)
 }
 
@@ -309,21 +309,37 @@ func TestBackupPodVolumes(t *testing.T) {
 	corev1api.AddToScheme(scheme)
 
 	tests := []struct {
-		name            string
-		bsl             string
-		uploaderType    string
-		volumes         []string
-		sourcePod       *corev1api.Pod
-		kubeClientObj   []runtime.Object
-		ctlClientObj    []runtime.Object
-		veleroClientObj []runtime.Object
-		veleroReactors  []reactor
-		runtimeScheme   *runtime.Scheme
-		pvbs            int
-		errs            []string
+		name                  string
+		bsl                   string
+		uploaderType          string
+		volumes               []string
+		sourcePod             *corev1api.Pod
+		kubeClientObj         []runtime.Object
+		ctlClientObj          []runtime.Object
+		veleroClientObj       []runtime.Object
+		veleroReactors        []reactor
+		runtimeScheme         *runtime.Scheme
+		pvbs                  int
+		mockGetRepositoryType bool
+		errs                  []string
 	}{
 		{
 			name: "empty volume list",
+		},
+		{
+			name: "wrong uploader type",
+			volumes: []string{
+				"fake-volume-1",
+				"fake-volume-2",
+			},
+			sourcePod: createPodObj(true, false, false, 2),
+			kubeClientObj: []runtime.Object{
+				createNodeAgentPodObj(true),
+			},
+			uploaderType: "fake-uploader-type",
+			errs: []string{
+				"invalid uploader type 'fake-uploader-type', valid upload types are: 'restic', 'kopia'",
+			},
 		},
 		{
 			name: "pod is not running",
@@ -348,7 +364,8 @@ func TestBackupPodVolumes(t *testing.T) {
 				"fake-volume-1",
 				"fake-volume-2",
 			},
-			sourcePod: createPodObj(true, false, false, 2),
+			sourcePod:    createPodObj(true, false, false, 2),
+			uploaderType: "kopia",
 			errs: []string{
 				"daemonset pod not found in running state in node fake-node-name",
 			},
@@ -363,9 +380,10 @@ func TestBackupPodVolumes(t *testing.T) {
 			kubeClientObj: []runtime.Object{
 				createNodeAgentPodObj(true),
 			},
-			uploaderType: "fake-uploader-type",
+			uploaderType:          "kopia",
+			mockGetRepositoryType: true,
 			errs: []string{
-				"empty repository type, uploader fake-uploader-type",
+				"empty repository type, uploader kopia",
 			},
 		},
 		{
@@ -542,6 +560,12 @@ func TestBackupPodVolumes(t *testing.T) {
 
 			require.NoError(t, err)
 
+			if test.mockGetRepositoryType {
+				funcGetRepositoryType = func(string) string { return "" }
+			} else {
+				funcGetRepositoryType = getRepositoryType
+			}
+
 			pvbs, _, errs := bp.BackupPodVolumes(backupObj, test.sourcePod, test.volumes, nil, velerotest.NewLogger())
 
 			if errs == nil {
@@ -570,7 +594,10 @@ func (l *logHook) Fire(entry *logrus.Entry) error {
 }
 
 func TestWaitAllPodVolumesProcessed(t *testing.T) {
-	timeoutCtx, _ := context.WithTimeout(context.Background(), 1*time.Second)
+	timeoutCtx, cancelFunc := context.WithTimeout(context.Background(), 1*time.Second)
+	defer func() {
+		cancelFunc()
+	}()
 	cases := []struct {
 		name              string
 		ctx               context.Context
@@ -632,11 +659,11 @@ func TestWaitAllPodVolumesProcessed(t *testing.T) {
 		if c.statusToBeUpdated != nil {
 			pvb := &velerov1api.PodVolumeBackup{}
 			err := client.Get(context.Background(), ctrlclient.ObjectKey{Namespace: newPVB.Namespace, Name: newPVB.Name}, pvb)
-			require.Nil(t, err)
+			require.NoError(t, err)
 
 			pvb.Status = *c.statusToBeUpdated
 			err = client.Update(context.Background(), pvb)
-			require.Nil(t, err)
+			require.NoError(t, err)
 		}
 
 		pvbs := backuper.WaitAllPodVolumesProcessed(logger)

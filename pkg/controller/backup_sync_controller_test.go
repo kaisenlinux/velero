@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
@@ -144,7 +144,7 @@ func defaultLocationWithLongerLocationName(namespace string) *velerov1api.Backup
 	}
 }
 
-func numBackups(c ctrlClient.WithWatch, ns string) (int, error) {
+func numBackups(c ctrlClient.WithWatch) (int, error) {
 	var existingK8SBackups velerov1api.BackupList
 	err := c.List(context.TODO(), &existingK8SBackups, &ctrlClient.ListOptions{})
 	if err != nil {
@@ -692,7 +692,7 @@ var _ = Describe("Backup Sync Reconciler", func() {
 			}
 			r.deleteOrphanedBackups(ctx, bslName, test.cloudBackups, velerotest.NewLogger())
 
-			numBackups, err := numBackups(client, r.namespace)
+			numBackups, err := numBackups(client)
 			Expect(err).ShouldNot(HaveOccurred())
 
 			fmt.Println("")

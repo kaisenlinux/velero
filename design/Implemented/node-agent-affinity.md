@@ -26,18 +26,18 @@ Therefore, in order to improve the compatibility, it is worthy to configure the 
 
 ## Non-Goals
 - It is also beneficial to support VGDP instances affinity for PodVolume backup/restore, however, it is not possible since VGDP instances for PodVolume backup/restore should always run in the node where the source/target pods are created.  
-- It is also beneficial to support VGDP instances affinity for data movement restores, however, it is not possible in some cases. For example, when the `volumeBindingMode` in the storageclass is `WaitForFirstConsumer`, the restore volume must be mounted in the node where the target pod is scheduled, so the VGDP instance must run in the same node. On the other hand, considering the fact that restores may not frequently and centrally run, we will not support data movement restores.  
-- As elaberated in the [Volume Snapshot Data Movement Design][2], the Exposer may take different ways to expose snapshots, i.e., through backup pods (this is the only way supported at present). The implementation section below only considers this approach currently, if a new expose method is introduced in future, the definition of the affinity configurations and behaviors should still work, but we may need a new implementation.  
+- It is also beneficial to support VGDP instances affinity for data movement restores, however, it is not possible in some cases. For example, when the `volumeBindingMode` in the StorageClass is `WaitForFirstConsumer`, the restore volume must be mounted in the node where the target pod is scheduled, so the VGDP instance must run in the same node. On the other hand, considering the fact that restores may not frequently and centrally run, we will not support data movement restores.  
+- As elaborated in the [Volume Snapshot Data Movement Design][2], the Exposer may take different ways to expose snapshots, i.e., through backup pods (this is the only way supported at present). The implementation section below only considers this approach currently, if a new expose method is introduced in future, the definition of the affinity configurations and behaviors should still work, but we may need a new implementation.  
 
 ## Solution
 
-We will use the ```node-agent-config``` configMap to host the node affinity configurations.
+We will use the ConfigMap specified by `velero node-agent` CLI's parameter `--node-agent-configmap` to host the node affinity configurations.
 This configMap is not created by Velero, users should create it manually on demand. The configMap should be in the same namespace where Velero is installed. If multiple Velero instances are installed in different namespaces, there should be one configMap in each namespace which applies to node-agent in that namespace only.  
 Node-agent server checks these configurations at startup time and use it to initiate the related VGDP modules. Therefore, users could edit this configMap any time, but in order to make the changes effective, node-agent server needs to be restarted.  
-Inside ```node-agent-config``` configMap we will add one new kind of configuration as the data in the configMap, the name is ```loadAffinity```.  
+Inside the ConfigMap we will add one new kind of configuration as the data in the configMap, the name is ```loadAffinity```.  
 Users may want to set different LoadAffinity configurations according to different conditions (i.e., for different storages represented by StorageClass, CSI driver, etc.), so we define ```loadAffinity``` as an array. This is for extensibility consideration, at present, we don't implement multiple configurations support, so if there are multiple configurations, we always take the first one in the array.  
 
-The data structure for ```node-agent-config``` is as below:
+The data structure is as below:
 ```go
 type Configs struct {
 	// LoadConcurrency is the config for load concurrency per node.
@@ -63,7 +63,7 @@ Anti-affinity configuration means preventing VGDP instances running in the nodes
 - It could be defined by `MatchExpressions` of `metav1.LabelSelector`. The labels are defined in `Key` and `Values` of `MatchExpressions` and the `Operator` should be defined as `LabelSelectorOpNotIn` or `LabelSelectorOpDoesNotExist`.   
 
 ### Sample
-A sample of the ```node-agent-config``` configMap is as below:
+A sample of the ConfigMap is as below:
 ```json
 {
     "loadAffinity": [
@@ -101,7 +101,7 @@ This sample showcases one anti-affinity configuration:
 
 To create the configMap, users need to save something like the above sample to a json file and then run below command:
 ```
-kubectl create cm node-agent-config -n velero --from-file=<json file name>
+kubectl create cm <ConfigMap name> -n velero --from-file=<json file name>
 ``` 
 
 ### Implementation
@@ -111,15 +111,7 @@ It is possible that node-agent pods, as a daemonset, don't run in every worker n
 Otherwise, if a backupPod are scheduled to a node where node-agent pod is absent, the corresponding DataUpload CR will stay in `Accepted` phase until the prepare timeout (by default 30min).  
 
 At present, as part of the expose operations, the exposer creates a volume, represented by backupPVC, from the snapshot. The backupPVC uses the same storageClass with the source volume. If the `volumeBindingMode` in the storageClass is `Immediate`, the volume is immediately allocated from the underlying storage without waiting for the backupPod. On the other hand, the loadAffinity is set to the backupPod's affinity. If the backupPod is scheduled to a node where the snapshot volume is not accessible, e.g., because of storage topologies, the backupPod won't get into Running state, concequently, the data movement won't complete.  
-Once this problem happens, the backupPod stays in `Pending` phase, and the corresponding DataUpload CR stays in `Accepted` phase until the prepare timeout (by default 30min).   
-
-There is a common solution for the both problems:
-- We have an existing logic to periodically enqueue the dataupload CRs which are in the `Accepted` phase for timeout and cancel checks
-- We add a new logic to this existing logic to check if the corresponding backupPods are in unrecoverable status
-- The above problems could be covered by this check, because in both cases the backupPods are in abnormal and unrecoverable status
-- If a backupPod is unrecoverable, the dataupload controller cancels the dataupload and deletes the backupPod
-
-Specifically, when the above problems happen, the status of a backupPod is like below:
+Once this problem happens, the backupPod stays in `Pending` phase, and the corresponding DataUpload CR stays in `Accepted` phase until the prepare timeout (by default 30min). Below is an example of the backupPod's status when the problem happens:   
 ```
   status:
     conditions:
@@ -132,6 +124,9 @@ Specifically, when the above problems happen, the status of a backupPod is like 
       type: PodScheduled
     phase: Pending
 ```    
+
+On the other hand, the backupPod is deleted after the prepare timeout, so there is no way to tell the cause is one of the above problems or others.  
+To help the troubleshooting, we can add some diagnostic mechanism to discover the status of the backupPod and node-agent in the same node before deleting it as a result of the prepare timeout.  
 
 [1]: Implemented/unified-repo-and-kopia-integration/unified-repo-and-kopia-integration.md
 [2]: volume-snapshot-data-movement/volume-snapshot-data-movement.md

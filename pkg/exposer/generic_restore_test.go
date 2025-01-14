@@ -31,6 +31,7 @@ import (
 	velerotest "github.com/vmware-tanzu/velero/pkg/test"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	corev1api "k8s.io/api/core/v1"
 	clientTesting "k8s.io/client-go/testing"
 )
@@ -74,7 +75,17 @@ func TestRestoreExpose(t *testing.T) {
 			Kind:       "DaemonSet",
 			APIVersion: appsv1.SchemeGroupVersion.String(),
 		},
-		Spec: appsv1.DaemonSetSpec{},
+		Spec: appsv1.DaemonSetSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Image: "fake-image",
+						},
+					},
+				},
+			},
+		},
 	}
 
 	tests := []struct {
@@ -169,7 +180,7 @@ func TestRestoreExpose(t *testing.T) {
 				}
 			}
 
-			err := exposer.Expose(context.Background(), ownerObject, test.targetPVCName, test.sourceNamespace, map[string]string{}, time.Millisecond)
+			err := exposer.Expose(context.Background(), ownerObject, test.targetPVCName, test.sourceNamespace, map[string]string{}, corev1.ResourceRequirements{}, time.Millisecond)
 			assert.EqualError(t, err, test.err)
 		})
 	}
@@ -429,14 +440,7 @@ func TestRestorePeekExpose(t *testing.T) {
 			Name:      restore.Name,
 		},
 		Status: corev1api.PodStatus{
-			Phase: corev1api.PodPending,
-			Conditions: []corev1api.PodCondition{
-				{
-					Type:    corev1api.PodScheduled,
-					Reason:  "Unschedulable",
-					Message: "unrecoverable",
-				},
-			},
+			Phase: corev1api.PodFailed,
 		},
 	}
 
@@ -463,7 +467,7 @@ func TestRestorePeekExpose(t *testing.T) {
 			kubeClientObj: []runtime.Object{
 				restorePodUrecoverable,
 			},
-			err: "Pod is unschedulable: unrecoverable",
+			err: "Pod is in abnormal state [Failed], message []",
 		},
 		{
 			name:         "succeed",
@@ -500,6 +504,261 @@ func TestRestorePeekExpose(t *testing.T) {
 			} else {
 				assert.EqualError(t, err, test.err)
 			}
+		})
+	}
+}
+
+func Test_ReastoreDiagnoseExpose(t *testing.T) {
+	restore := &velerov1.Restore{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: velerov1.SchemeGroupVersion.String(),
+			Kind:       "Restore",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: velerov1.DefaultNamespace,
+			Name:      "fake-restore",
+			UID:       "fake-uid",
+		},
+	}
+
+	restorePodWithoutNodeName := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: velerov1.DefaultNamespace,
+			Name:      "fake-restore",
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: restore.APIVersion,
+					Kind:       restore.Kind,
+					Name:       restore.Name,
+					UID:        restore.UID,
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			Conditions: []corev1.PodCondition{
+				{
+					Type:    corev1.PodInitialized,
+					Status:  corev1.ConditionTrue,
+					Message: "fake-pod-message",
+				},
+			},
+		},
+	}
+
+	restorePodWithNodeName := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: velerov1.DefaultNamespace,
+			Name:      "fake-restore",
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: restore.APIVersion,
+					Kind:       restore.Kind,
+					Name:       restore.Name,
+					UID:        restore.UID,
+				},
+			},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "fake-node",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			Conditions: []corev1.PodCondition{
+				{
+					Type:    corev1.PodInitialized,
+					Status:  corev1.ConditionTrue,
+					Message: "fake-pod-message",
+				},
+			},
+		},
+	}
+
+	restorePVCWithoutVolumeName := corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: velerov1.DefaultNamespace,
+			Name:      "fake-restore",
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: restore.APIVersion,
+					Kind:       restore.Kind,
+					Name:       restore.Name,
+					UID:        restore.UID,
+				},
+			},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimPending,
+		},
+	}
+
+	restorePVCWithVolumeName := corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: velerov1.DefaultNamespace,
+			Name:      "fake-restore",
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: restore.APIVersion,
+					Kind:       restore.Kind,
+					Name:       restore.Name,
+					UID:        restore.UID,
+				},
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName: "fake-pv",
+		},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimPending,
+		},
+	}
+
+	restorePV := corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "fake-pv",
+		},
+		Status: corev1.PersistentVolumeStatus{
+			Phase:   corev1.VolumePending,
+			Message: "fake-pv-message",
+		},
+	}
+
+	nodeAgentPod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: velerov1.DefaultNamespace,
+			Name:      "node-agent-pod-1",
+			Labels:    map[string]string{"name": "node-agent"},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "fake-node",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	tests := []struct {
+		name          string
+		ownerRestore  *velerov1.Restore
+		kubeClientObj []runtime.Object
+		expected      string
+	}{
+		{
+			name:         "no pod, pvc",
+			ownerRestore: restore,
+			expected: `begin diagnose restore exposer
+error getting restore pod fake-restore, err: pods "fake-restore" not found
+error getting restore pvc fake-restore, err: persistentvolumeclaims "fake-restore" not found
+end diagnose restore exposer`,
+		},
+		{
+			name:         "pod without node name, pvc without volume name, vs without status",
+			ownerRestore: restore,
+			kubeClientObj: []runtime.Object{
+				&restorePodWithoutNodeName,
+				&restorePVCWithoutVolumeName,
+			},
+			expected: `begin diagnose restore exposer
+Pod velero/fake-restore, phase Pending, node name 
+Pod condition Initialized, status True, reason , message fake-pod-message
+PVC velero/fake-restore, phase Pending, binding to 
+end diagnose restore exposer`,
+		},
+		{
+			name:         "pod without node name, pvc without volume name",
+			ownerRestore: restore,
+			kubeClientObj: []runtime.Object{
+				&restorePodWithoutNodeName,
+				&restorePVCWithoutVolumeName,
+			},
+			expected: `begin diagnose restore exposer
+Pod velero/fake-restore, phase Pending, node name 
+Pod condition Initialized, status True, reason , message fake-pod-message
+PVC velero/fake-restore, phase Pending, binding to 
+end diagnose restore exposer`,
+		},
+		{
+			name:         "pod with node name, no node agent",
+			ownerRestore: restore,
+			kubeClientObj: []runtime.Object{
+				&restorePodWithNodeName,
+				&restorePVCWithoutVolumeName,
+			},
+			expected: `begin diagnose restore exposer
+Pod velero/fake-restore, phase Pending, node name fake-node
+Pod condition Initialized, status True, reason , message fake-pod-message
+node-agent is not running in node fake-node, err: daemonset pod not found in running state in node fake-node
+PVC velero/fake-restore, phase Pending, binding to 
+end diagnose restore exposer`,
+		},
+		{
+			name:         "pod with node name, node agent is running",
+			ownerRestore: restore,
+			kubeClientObj: []runtime.Object{
+				&restorePodWithNodeName,
+				&restorePVCWithoutVolumeName,
+				&nodeAgentPod,
+			},
+			expected: `begin diagnose restore exposer
+Pod velero/fake-restore, phase Pending, node name fake-node
+Pod condition Initialized, status True, reason , message fake-pod-message
+PVC velero/fake-restore, phase Pending, binding to 
+end diagnose restore exposer`,
+		},
+		{
+			name:         "pvc with volume name, no pv",
+			ownerRestore: restore,
+			kubeClientObj: []runtime.Object{
+				&restorePodWithNodeName,
+				&restorePVCWithVolumeName,
+				&nodeAgentPod,
+			},
+			expected: `begin diagnose restore exposer
+Pod velero/fake-restore, phase Pending, node name fake-node
+Pod condition Initialized, status True, reason , message fake-pod-message
+PVC velero/fake-restore, phase Pending, binding to fake-pv
+error getting restore pv fake-pv, err: persistentvolumes "fake-pv" not found
+end diagnose restore exposer`,
+		},
+		{
+			name:         "pvc with volume name, pv exists",
+			ownerRestore: restore,
+			kubeClientObj: []runtime.Object{
+				&restorePodWithNodeName,
+				&restorePVCWithVolumeName,
+				&restorePV,
+				&nodeAgentPod,
+			},
+			expected: `begin diagnose restore exposer
+Pod velero/fake-restore, phase Pending, node name fake-node
+Pod condition Initialized, status True, reason , message fake-pod-message
+PVC velero/fake-restore, phase Pending, binding to fake-pv
+PV fake-pv, phase Pending, reason , message fake-pv-message
+end diagnose restore exposer`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fakeKubeClient := fake.NewSimpleClientset(test.kubeClientObj...)
+
+			e := genericRestoreExposer{
+				kubeClient: fakeKubeClient,
+				log:        velerotest.NewLogger(),
+			}
+
+			var ownerObject corev1api.ObjectReference
+			if test.ownerRestore != nil {
+				ownerObject = corev1api.ObjectReference{
+					Kind:       test.ownerRestore.Kind,
+					Namespace:  test.ownerRestore.Namespace,
+					Name:       test.ownerRestore.Name,
+					UID:        test.ownerRestore.UID,
+					APIVersion: test.ownerRestore.APIVersion,
+				}
+			}
+
+			diag := e.DiagnoseExpose(context.Background(), ownerObject)
+			assert.Equal(t, test.expected, diag)
 		})
 	}
 }

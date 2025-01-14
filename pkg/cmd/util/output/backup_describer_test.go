@@ -22,17 +22,15 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/vmware-tanzu/velero/internal/volume"
-	"github.com/vmware-tanzu/velero/pkg/itemoperation"
-
-	"github.com/stretchr/testify/require"
-
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 
-	"github.com/vmware-tanzu/velero/pkg/builder"
-
+	"github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	velerov2alpha1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
+	"github.com/vmware-tanzu/velero/pkg/builder"
+	"github.com/vmware-tanzu/velero/pkg/itemoperation"
 )
 
 func TestDescribeUploaderConfig(t *testing.T) {
@@ -353,6 +351,7 @@ func TestDescribeNativeSnapshots(t *testing.T) {
 				{
 					BackupMethod: volume.NativeSnapshot,
 					PVName:       "pv-1",
+					Result:       volume.VolumeResultSucceeded,
 					NativeSnapshotInfo: &volume.NativeSnapshotInfo{
 						SnapshotHandle: "snapshot-1",
 						VolumeType:     "ebs",
@@ -368,6 +367,7 @@ func TestDescribeNativeSnapshots(t *testing.T) {
       Type:               ebs
       Availability Zone:  us-east-2
       IOPS:               1000 mbps
+      Result:             succeeded
 `,
 		},
 	}
@@ -438,6 +438,7 @@ func TestCSISnapshots(t *testing.T) {
 					PVCNamespace:          "pvc-ns-2",
 					PVCName:               "pvc-2",
 					PreserveLocalSnapshot: true,
+					Result:                volume.VolumeResultSucceeded,
 					CSISnapshotInfo: &volume.CSISnapshotInfo{
 						SnapshotHandle: "snapshot-2",
 						Size:           1024,
@@ -456,6 +457,7 @@ func TestCSISnapshots(t *testing.T) {
         Storage Snapshot ID: snapshot-2
         Snapshot Size (bytes): 1024
         CSI Driver: fake-driver
+        Result: succeeded
 `,
 		},
 		{
@@ -487,6 +489,7 @@ func TestCSISnapshots(t *testing.T) {
 					PVCNamespace:      "pvc-ns-4",
 					PVCName:           "pvc-4",
 					SnapshotDataMoved: true,
+					Result:            volume.VolumeResultSucceeded,
 					SnapshotDataMovementInfo: &volume.SnapshotDataMovementInfo{
 						DataMover:      "velero",
 						UploaderType:   "fake-uploader",
@@ -503,6 +506,7 @@ func TestCSISnapshots(t *testing.T) {
         Data Mover: velero
         Uploader Type: fake-uploader
         Moved data Size (bytes): 0
+        Result: succeeded
 `,
 		},
 		{
@@ -512,12 +516,14 @@ func TestCSISnapshots(t *testing.T) {
 					BackupMethod:      volume.CSISnapshot,
 					PVCNamespace:      "pvc-ns-5",
 					PVCName:           "pvc-5",
+					Result:            volume.VolumeResultFailed,
 					SnapshotDataMoved: true,
 					SnapshotDataMovementInfo: &volume.SnapshotDataMovementInfo{
 						UploaderType:   "fake-uploader",
 						SnapshotHandle: "fake-repo-id-5",
 						OperationID:    "fake-operation-5",
 						Size:           100,
+						Phase:          velerov2alpha1.DataUploadPhaseFailed,
 					},
 				},
 			},
@@ -529,6 +535,7 @@ func TestCSISnapshots(t *testing.T) {
         Data Mover: velero
         Uploader Type: fake-uploader
         Moved data Size (bytes): 100
+        Result: failed
 `,
 		},
 	}
@@ -616,14 +623,14 @@ func TestDescribePodVolumeBackups(t *testing.T) {
 
 func TestDescribeDeleteBackupRequests(t *testing.T) {
 	t1, err1 := time.Parse("2006-Jan-02", "2023-Jun-26")
-	require.Nil(t, err1)
+	require.NoError(t, err1)
 	dbr1 := builder.ForDeleteBackupRequest("velero", "dbr1").
 		ObjectMeta(builder.WithCreationTimestamp(t1)).
 		BackupName("bak-1").
 		Phase(velerov1api.DeleteBackupRequestPhaseProcessed).
 		Errors("some error").Result()
 	t2, err2 := time.Parse("2006-Jan-02", "2023-Jun-25")
-	require.Nil(t, err2)
+	require.NoError(t, err2)
 	dbr2 := builder.ForDeleteBackupRequest("velero", "dbr2").
 		ObjectMeta(builder.WithCreationTimestamp(t2)).
 		BackupName("bak-2").
@@ -669,11 +676,11 @@ func TestDescribeDeleteBackupRequests(t *testing.T) {
 
 func TestDescribeBackupItemOperation(t *testing.T) {
 	t1, err1 := time.Parse("2006-Jan-02", "2023-Jun-26")
-	require.Nil(t, err1)
+	require.NoError(t, err1)
 	t2, err2 := time.Parse("2006-Jan-02", "2023-Jun-25")
-	require.Nil(t, err2)
+	require.NoError(t, err2)
 	t3, err3 := time.Parse("2006-Jan-02", "2023-Jun-24")
-	require.Nil(t, err3)
+	require.NoError(t, err3)
 	input := builder.ForBackupOperation().
 		BackupName("backup-1").
 		OperationID("op-1").
