@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/vmware-tanzu/velero/internal/storage"
@@ -41,10 +42,10 @@ func TestStart(t *testing.T) {
 
 	ctx, cancelFunc := context.WithCancel(context.TODO())
 	client := (&fake.ClientBuilder{}).Build()
-	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter())
+	queue := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedItemBasedRateLimiter[reconcile.Request]())
 	source := NewPeriodicalEnqueueSource(logrus.WithContext(ctx).WithField("controller", "PES_TEST"), client, &velerov1.ScheduleList{}, 1*time.Second, PeriodicalEnqueueSourceOption{})
 
-	require.NoError(t, source.Start(ctx, nil, queue))
+	require.NoError(t, source.Start(ctx, queue))
 
 	// no resources
 	time.Sleep(1 * time.Second)
@@ -73,19 +74,23 @@ func TestPredicate(t *testing.T) {
 
 	ctx, cancelFunc := context.WithCancel(context.TODO())
 	client := (&fake.ClientBuilder{}).Build()
-	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter())
+	queue := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedItemBasedRateLimiter[reconcile.Request]())
+
+	pred := NewGenericEventPredicate(func(object crclient.Object) bool {
+		location := object.(*velerov1.BackupStorageLocation)
+		return storage.IsReadyToValidate(location.Spec.ValidationFrequency, location.Status.LastValidationTime, 1*time.Minute, logrus.WithContext(ctx).WithField("BackupStorageLocation", location.Name))
+	})
 	source := NewPeriodicalEnqueueSource(
 		logrus.WithContext(ctx).WithField("controller", "PES_TEST"),
 		client,
 		&velerov1.BackupStorageLocationList{},
 		1*time.Second,
-		PeriodicalEnqueueSourceOption{},
+		PeriodicalEnqueueSourceOption{
+			Predicates: []predicate.Predicate{pred},
+		},
 	)
 
-	require.NoError(t, source.Start(ctx, nil, queue, NewGenericEventPredicate(func(object crclient.Object) bool {
-		location := object.(*velerov1.BackupStorageLocation)
-		return storage.IsReadyToValidate(location.Spec.ValidationFrequency, location.Status.LastValidationTime, 1*time.Minute, logrus.WithContext(ctx).WithField("BackupStorageLocation", location.Name))
-	})))
+	require.NoError(t, source.Start(ctx, queue))
 
 	// Should not patch a backup storage location object status phase
 	// if the location's validation frequency is specifically set to zero
@@ -113,7 +118,7 @@ func TestOrder(t *testing.T) {
 
 	ctx, cancelFunc := context.WithCancel(context.TODO())
 	client := (&fake.ClientBuilder{}).Build()
-	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter())
+	queue := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedItemBasedRateLimiter[reconcile.Request]())
 	source := NewPeriodicalEnqueueSource(
 		logrus.WithContext(ctx).WithField("controller", "PES_TEST"),
 		client,
@@ -137,7 +142,7 @@ func TestOrder(t *testing.T) {
 		},
 	)
 
-	require.NoError(t, source.Start(ctx, nil, queue))
+	require.NoError(t, source.Start(ctx, queue))
 
 	// Should not patch a backup storage location object status phase
 	// if the location's validation frequency is specifically set to zero
@@ -170,8 +175,8 @@ func TestOrder(t *testing.T) {
 
 	first, _ := queue.Get()
 	bsl := &velerov1.BackupStorageLocation{}
-	require.Equal(t, "location2", first.(reconcile.Request).Name)
-	require.NoError(t, client.Get(ctx, first.(reconcile.Request).NamespacedName, bsl))
+	require.Equal(t, "location2", first.Name)
+	require.NoError(t, client.Get(ctx, first.NamespacedName, bsl))
 	require.True(t, bsl.Spec.Default)
 
 	cancelFunc()

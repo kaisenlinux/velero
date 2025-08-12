@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	corev1api "k8s.io/api/core/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	velerocredentials "github.com/vmware-tanzu/velero/internal/credentials"
 	credmock "github.com/vmware-tanzu/velero/internal/credentials/mocks"
@@ -537,7 +538,7 @@ func TestGetStoreOptions(t *testing.T) {
 	testCases := []struct {
 		name        string
 		funcTable   localFuncTable
-		repoParam   interface{}
+		repoParam   any
 		expected    map[string]string
 		expectedErr string
 	}{
@@ -600,6 +601,13 @@ func TestGetStoreOptions(t *testing.T) {
 }
 
 func TestPrepareRepo(t *testing.T) {
+	bsl := velerov1api.BackupStorageLocation{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "fake-bsl",
+			Namespace: velerov1api.DefaultNamespace,
+		},
+	}
+
 	testCases := []struct {
 		name            string
 		funcTable       localFuncTable
@@ -608,6 +616,7 @@ func TestPrepareRepo(t *testing.T) {
 		retFuncInit     func(context.Context, udmrepo.RepoOptions, bool) error
 		credStoreReturn string
 		credStoreError  error
+		readOnlyBSL     bool
 		expectedErr     string
 	}{
 		{
@@ -655,7 +664,29 @@ func TestPrepareRepo(t *testing.T) {
 			},
 		},
 		{
-			name:            "initialize fail",
+			name:            "bsl is readonly",
+			readOnlyBSL:     true,
+			getter:          new(credmock.SecretStore),
+			credStoreReturn: "fake-password",
+			funcTable: localFuncTable{
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, map[string]string) (map[string]string, error) {
+					return map[string]string{}, nil
+				},
+				getStorageCredentials: func(*velerov1api.BackupStorageLocation, velerocredentials.FileStore) (map[string]string, error) {
+					return map[string]string{}, nil
+				},
+			},
+			repoService: new(reposervicenmocks.BackupRepoService),
+			retFuncInit: func(ctx context.Context, repoOption udmrepo.RepoOptions, createNew bool) error {
+				if !createNew {
+					return repo.ErrRepositoryNotInitialized
+				}
+				return errors.New("fake-error-2")
+			},
+			expectedErr: "cannot create new backup repo for read-only backup storage location velero/fake-bsl",
+		},
+		{
+			name:            "connect fail",
 			getter:          new(credmock.SecretStore),
 			credStoreReturn: "fake-password",
 			funcTable: localFuncTable{
@@ -676,7 +707,7 @@ func TestPrepareRepo(t *testing.T) {
 			expectedErr: "error to connect to backup repo: fake-error-1",
 		},
 		{
-			name:            "not initialize",
+			name:            "initialize error",
 			getter:          new(credmock.SecretStore),
 			credStoreReturn: "fake-password",
 			funcTable: localFuncTable{
@@ -695,6 +726,26 @@ func TestPrepareRepo(t *testing.T) {
 				return errors.New("fake-error-2")
 			},
 			expectedErr: "error to create backup repo: fake-error-2",
+		},
+		{
+			name:            "initialize succeed",
+			getter:          new(credmock.SecretStore),
+			credStoreReturn: "fake-password",
+			funcTable: localFuncTable{
+				getStorageVariables: func(*velerov1api.BackupStorageLocation, string, string, map[string]string) (map[string]string, error) {
+					return map[string]string{}, nil
+				},
+				getStorageCredentials: func(*velerov1api.BackupStorageLocation, velerocredentials.FileStore) (map[string]string, error) {
+					return map[string]string{}, nil
+				},
+			},
+			repoService: new(reposervicenmocks.BackupRepoService),
+			retFuncInit: func(ctx context.Context, repoOption udmrepo.RepoOptions, createNew bool) error {
+				if !createNew {
+					return repo.ErrRepositoryNotInitialized
+				}
+				return nil
+			},
 		},
 	}
 
@@ -718,8 +769,14 @@ func TestPrepareRepo(t *testing.T) {
 
 			tc.repoService.On("Init", mock.Anything, mock.Anything, mock.Anything).Return(tc.retFuncInit)
 
+			if tc.readOnlyBSL {
+				bsl.Spec.AccessMode = velerov1api.BackupStorageLocationAccessModeReadOnly
+			} else {
+				bsl.Spec.AccessMode = velerov1api.BackupStorageLocationAccessModeReadWrite
+			}
+
 			err := urp.PrepareRepo(context.Background(), RepoParam{
-				BackupLocation: &velerov1api.BackupStorageLocation{},
+				BackupLocation: &bsl,
 				BackupRepo:     &velerov1api.BackupRepository{},
 			})
 
@@ -741,9 +798,9 @@ func TestForget(t *testing.T) {
 		getter          *credmock.SecretStore
 		repoService     *reposervicenmocks.BackupRepoService
 		backupRepo      *reposervicenmocks.BackupRepo
-		retFuncOpen     []interface{}
-		retFuncDelete   interface{}
-		retFuncFlush    interface{}
+		retFuncOpen     []any
+		retFuncDelete   any
+		retFuncFlush    any
 		credStoreReturn string
 		credStoreError  error
 		expectedErr     string
@@ -765,7 +822,7 @@ func TestForget(t *testing.T) {
 				},
 			},
 			repoService: new(reposervicenmocks.BackupRepoService),
-			retFuncOpen: []interface{}{
+			retFuncOpen: []any{
 				func(context.Context, udmrepo.RepoOptions) udmrepo.BackupRepo {
 					return backupRepo
 				},
@@ -790,7 +847,7 @@ func TestForget(t *testing.T) {
 			},
 			repoService: new(reposervicenmocks.BackupRepoService),
 			backupRepo:  new(reposervicenmocks.BackupRepo),
-			retFuncOpen: []interface{}{
+			retFuncOpen: []any{
 				func(context.Context, udmrepo.RepoOptions) udmrepo.BackupRepo {
 					return backupRepo
 				},
@@ -818,7 +875,7 @@ func TestForget(t *testing.T) {
 			},
 			repoService: new(reposervicenmocks.BackupRepoService),
 			backupRepo:  new(reposervicenmocks.BackupRepo),
-			retFuncOpen: []interface{}{
+			retFuncOpen: []any{
 				func(context.Context, udmrepo.RepoOptions) udmrepo.BackupRepo {
 					return backupRepo
 				},
@@ -890,9 +947,9 @@ func TestBatchForget(t *testing.T) {
 		getter          *credmock.SecretStore
 		repoService     *reposervicenmocks.BackupRepoService
 		backupRepo      *reposervicenmocks.BackupRepo
-		retFuncOpen     []interface{}
-		retFuncDelete   interface{}
-		retFuncFlush    interface{}
+		retFuncOpen     []any
+		retFuncDelete   any
+		retFuncFlush    any
 		credStoreReturn string
 		credStoreError  error
 		snapshots       []string
@@ -915,7 +972,7 @@ func TestBatchForget(t *testing.T) {
 				},
 			},
 			repoService: new(reposervicenmocks.BackupRepoService),
-			retFuncOpen: []interface{}{
+			retFuncOpen: []any{
 				func(context.Context, udmrepo.RepoOptions) udmrepo.BackupRepo {
 					return backupRepo
 				},
@@ -940,7 +997,7 @@ func TestBatchForget(t *testing.T) {
 			},
 			repoService: new(reposervicenmocks.BackupRepoService),
 			backupRepo:  new(reposervicenmocks.BackupRepo),
-			retFuncOpen: []interface{}{
+			retFuncOpen: []any{
 				func(context.Context, udmrepo.RepoOptions) udmrepo.BackupRepo {
 					return backupRepo
 				},
@@ -969,7 +1026,7 @@ func TestBatchForget(t *testing.T) {
 			},
 			repoService: new(reposervicenmocks.BackupRepoService),
 			backupRepo:  new(reposervicenmocks.BackupRepo),
-			retFuncOpen: []interface{}{
+			retFuncOpen: []any{
 				func(context.Context, udmrepo.RepoOptions) udmrepo.BackupRepo {
 					return backupRepo
 				},
@@ -1037,16 +1094,29 @@ func TestBatchForget(t *testing.T) {
 }
 
 func TestInitRepo(t *testing.T) {
+	bsl := velerov1api.BackupStorageLocation{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "fake-bsl",
+			Namespace: velerov1api.DefaultNamespace,
+		},
+	}
+
 	testCases := []struct {
 		name            string
 		funcTable       localFuncTable
 		getter          *credmock.SecretStore
 		repoService     *reposervicenmocks.BackupRepoService
-		retFuncInit     interface{}
+		retFuncInit     any
 		credStoreReturn string
 		credStoreError  error
+		readOnlyBSL     bool
 		expectedErr     string
 	}{
+		{
+			name:        "bsl is readonly",
+			readOnlyBSL: true,
+			expectedErr: "cannot create new backup repo for read-only backup storage location velero/fake-bsl",
+		},
 		{
 			name:        "get repo option fail",
 			expectedErr: "error to get repo options: error to get repo password: invalid credentials interface",
@@ -1110,8 +1180,14 @@ func TestInitRepo(t *testing.T) {
 				tc.repoService.On("Init", mock.Anything, mock.Anything, mock.Anything).Return(tc.retFuncInit)
 			}
 
+			if tc.readOnlyBSL {
+				bsl.Spec.AccessMode = velerov1api.BackupStorageLocationAccessModeReadOnly
+			} else {
+				bsl.Spec.AccessMode = velerov1api.BackupStorageLocationAccessModeReadWrite
+			}
+
 			err := urp.InitRepo(context.Background(), RepoParam{
-				BackupLocation: &velerov1api.BackupStorageLocation{},
+				BackupLocation: &bsl,
 				BackupRepo:     &velerov1api.BackupRepository{},
 			})
 
@@ -1130,7 +1206,7 @@ func TestConnectToRepo(t *testing.T) {
 		funcTable       localFuncTable
 		getter          *credmock.SecretStore
 		repoService     *reposervicenmocks.BackupRepoService
-		retFuncInit     interface{}
+		retFuncInit     any
 		credStoreReturn string
 		credStoreError  error
 		expectedErr     string
@@ -1221,8 +1297,8 @@ func TestBoostRepoConnect(t *testing.T) {
 		getter          *credmock.SecretStore
 		repoService     *reposervicenmocks.BackupRepoService
 		backupRepo      *reposervicenmocks.BackupRepo
-		retFuncInit     interface{}
-		retFuncOpen     []interface{}
+		retFuncInit     any
+		retFuncOpen     []any
 		credStoreReturn string
 		credStoreError  error
 		expectedErr     string
@@ -1244,7 +1320,7 @@ func TestBoostRepoConnect(t *testing.T) {
 				},
 			},
 			repoService: new(reposervicenmocks.BackupRepoService),
-			retFuncOpen: []interface{}{
+			retFuncOpen: []any{
 				func(context.Context, udmrepo.RepoOptions) udmrepo.BackupRepo {
 					return backupRepo
 				},
@@ -1271,7 +1347,7 @@ func TestBoostRepoConnect(t *testing.T) {
 				},
 			},
 			repoService: new(reposervicenmocks.BackupRepoService),
-			retFuncOpen: []interface{}{
+			retFuncOpen: []any{
 				func(context.Context, udmrepo.RepoOptions) udmrepo.BackupRepo {
 					return backupRepo
 				},
@@ -1298,7 +1374,7 @@ func TestBoostRepoConnect(t *testing.T) {
 			},
 			repoService: new(reposervicenmocks.BackupRepoService),
 			backupRepo:  new(reposervicenmocks.BackupRepo),
-			retFuncOpen: []interface{}{
+			retFuncOpen: []any{
 				func(context.Context, udmrepo.RepoOptions) udmrepo.BackupRepo {
 					return backupRepo
 				},
@@ -1362,7 +1438,7 @@ func TestPruneRepo(t *testing.T) {
 		funcTable       localFuncTable
 		getter          *credmock.SecretStore
 		repoService     *reposervicenmocks.BackupRepoService
-		retFuncMaintain interface{}
+		retFuncMaintain any
 		credStoreReturn string
 		credStoreError  error
 		expectedErr     string

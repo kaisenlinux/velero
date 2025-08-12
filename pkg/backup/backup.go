@@ -26,18 +26,18 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	corev1api "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/selection"
 	kubeerrs "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 	kbclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -73,6 +73,9 @@ const BackupVersion = 1
 
 // BackupFormatVersion is the current backup version for Velero, including major, minor, and patch.
 const BackupFormatVersion = "1.1.0"
+
+// ArgoCD managed by namespace label key
+const ArgoCDManagedByNamespaceLabel = "argocd.argoproj.io/managed-by"
 
 // Backupper performs backups.
 type Backupper interface {
@@ -115,6 +118,7 @@ type kubernetesBackupper struct {
 	podCommandExecutor        podexec.PodCommandExecutor
 	podVolumeBackupperFactory podvolume.BackupperFactory
 	podVolumeTimeout          time.Duration
+	podVolumeContext          context.Context
 	defaultVolumesToFsBackup  bool
 	clientPageSize            int
 	uploaderType              string
@@ -235,7 +239,7 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 	gzippedData := gzip.NewWriter(backupFile)
 	defer gzippedData.Close()
 
-	tw := tar.NewWriter(gzippedData)
+	tw := NewTarWriter(tar.NewWriter(gzippedData))
 	defer tw.Close()
 
 	log.Info("Writing backup version file")
@@ -246,6 +250,18 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 	backupRequest.NamespaceIncludesExcludes = getNamespaceIncludesExcludes(backupRequest.Backup)
 	log.Infof("Including namespaces: %s", backupRequest.NamespaceIncludesExcludes.IncludesString())
 	log.Infof("Excluding namespaces: %s", backupRequest.NamespaceIncludesExcludes.ExcludesString())
+
+	// check if there are any namespaces included in the backup which are managed by argoCD
+	// We will check for the existence of a ArgoCD label in the includedNamespaces and add a warning
+	// so that users are at least aware about the existence of argoCD managed ns in their backup
+	// Related Issue: https://github.com/vmware-tanzu/velero/issues/7905
+	if len(backupRequest.Spec.IncludedNamespaces) > 0 {
+		nsManagedByArgoCD := getNamespacesManagedByArgoCD(kb.kbClient, backupRequest.Spec.IncludedNamespaces, log)
+
+		if len(nsManagedByArgoCD) > 0 {
+			log.Warnf("backup operation may encounter complications and potentially produce undesirable results due to the inclusion of namespaces %v managed by ArgoCD in the backup.", nsManagedByArgoCD)
+		}
+	}
 
 	if collections.UseOldResourceFilters(backupRequest.Spec) {
 		backupRequest.ResourceIncludesExcludes = collections.GetGlobalResourceIncludesExcludes(kb.discoveryHelper, log,
@@ -284,8 +300,6 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 		return err
 	}
 
-	backupRequest.BackedUpItems = map[itemKey]struct{}{}
-
 	podVolumeTimeout := kb.podVolumeTimeout
 	if val := backupRequest.Annotations[velerov1api.PodVolumeOperationTimeoutAnnotation]; val != "" {
 		parsed, err := time.ParseDuration(val)
@@ -296,12 +310,13 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 		}
 	}
 
-	ctx, cancelFunc := context.WithTimeout(context.Background(), podVolumeTimeout)
-	defer cancelFunc()
+	var podVolumeCancelFunc context.CancelFunc
+	kb.podVolumeContext, podVolumeCancelFunc = context.WithTimeout(context.Background(), podVolumeTimeout)
+	defer podVolumeCancelFunc()
 
 	var podVolumeBackupper podvolume.Backupper
 	if kb.podVolumeBackupperFactory != nil {
-		podVolumeBackupper, err = kb.podVolumeBackupperFactory.NewBackupper(ctx, backupRequest.Backup, kb.uploaderType)
+		podVolumeBackupper, err = kb.podVolumeBackupperFactory.NewBackupper(kb.podVolumeContext, log, backupRequest.Backup, kb.uploaderType)
 		if err != nil {
 			log.WithError(errors.WithStack(err)).Debugf("Error from NewBackupper")
 			return errors.WithStack(err)
@@ -340,7 +355,7 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 	}
 	backupRequest.Status.Progress = &velerov1api.BackupProgress{TotalItems: len(items)}
 
-	var resourcePolicy *resourcepolicies.Policies = nil
+	var resourcePolicy *resourcepolicies.Policies
 	if backupRequest.ResPolicies != nil {
 		resourcePolicy = backupRequest.ResPolicies
 	}
@@ -366,6 +381,7 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 			boolptr.IsSetToTrue(backupRequest.Spec.DefaultVolumesToFsBackup),
 			!backupRequest.ResourceIncludesExcludes.ShouldInclude(kuberesource.PersistentVolumeClaims.String()),
 		),
+		kubernetesBackupper: kb,
 	}
 
 	// helper struct to send current progress between the main
@@ -417,6 +433,8 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 		}
 	}()
 
+	responseCtx, responseCancel := context.WithCancel(context.Background())
+
 	backedUpGroupResources := map[schema.GroupResource]bool{}
 	// Maps items in the item list from GR+NamespacedName to a slice of pointers to kubernetesResources
 	// We need the slice value since if the EnableAPIGroupVersions feature flag is set, there may
@@ -429,20 +447,71 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 			Name:          items[i].name,
 		}
 		itemsMap[key] = append(itemsMap[key], items[i])
+		// add to total items for progress reporting
+		if items[i].kind != "" {
+			backupRequest.BackedUpItems.AddItemToTotal(itemKey{
+				resource:  fmt.Sprintf("%s/%s", items[i].preferredGVR.GroupVersion().String(), items[i].kind),
+				namespace: items[i].namespace,
+				name:      items[i].name,
+			})
+		}
 	}
 
 	var itemBlock *BackupItemBlock
+	itemBlockReturn := make(chan ItemBlockReturn, 100)
+	wg := &sync.WaitGroup{}
+	// Handle returns from worker pool processing ItemBlocks
+	go func() {
+		for {
+			select {
+			case response := <-itemBlockReturn: // process each BackupItemBlock response
+				func() {
+					defer wg.Done()
+					if response.err != nil {
+						log.WithError(errors.WithStack((response.err))).Error("Got error in BackupItemBlock.")
+					}
+					for _, backedUpGR := range response.resources {
+						backedUpGroupResources[backedUpGR] = true
+					}
+					// We could eventually track which itemBlocks have finished
+					// using response.itemBlock
+
+					// updated total is computed as "how many items we've backed up so far,
+					// plus how many items are processed but not yet backed up plus how many
+					// we know of that are remaining to be processed"
+					backedUpItems, totalItems := backupRequest.BackedUpItems.BackedUpAndTotalLen()
+
+					// send a progress update
+					update <- progressUpdate{
+						totalItems:    totalItems,
+						itemsBackedUp: backedUpItems,
+					}
+
+					if len(response.itemBlock.Items) > 0 {
+						log.WithFields(map[string]any{
+							"progress":  "",
+							"kind":      response.itemBlock.Items[0].Item.GroupVersionKind().GroupKind().String(),
+							"namespace": response.itemBlock.Items[0].Item.GetNamespace(),
+							"name":      response.itemBlock.Items[0].Item.GetName(),
+						}).Infof("Backed up %d items out of an estimated total of %d (estimate will change throughout the backup)", backedUpItems, totalItems)
+					}
+				}()
+			case <-responseCtx.Done():
+				return
+			}
+		}
+	}()
 
 	for i := range items {
-		log.WithFields(map[string]interface{}{
+		log.WithFields(map[string]any{
 			"progress":  "",
 			"resource":  items[i].groupResource.String(),
 			"namespace": items[i].namespace,
 			"name":      items[i].name,
 		}).Infof("Processing item")
 
-		// Skip if this item has already been added to an ItemBlock
-		if items[i].inItemBlock {
+		// Skip if this item has already been processed (in a block or previously excluded)
+		if items[i].inItemBlockOrExcluded {
 			log.Debugf("Not creating new ItemBlock for %s %s/%s because it's already in an ItemBlock", items[i].groupResource.String(), items[i].namespace, items[i].name)
 		} else {
 			if itemBlock == nil {
@@ -477,30 +546,31 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 		addNextToBlock := i < len(items)-1 && items[i].orderedResource && items[i+1].orderedResource && items[i].groupResource == items[i+1].groupResource
 		if itemBlock != nil && len(itemBlock.Items) > 0 && !addNextToBlock {
 			log.Infof("Backing Up Item Block including %s %s/%s (%v items in block)", items[i].groupResource.String(), items[i].namespace, items[i].name, len(itemBlock.Items))
-			backedUpGRs := kb.backupItemBlock(ctx, *itemBlock)
-			for _, backedUpGR := range backedUpGRs {
-				backedUpGroupResources[backedUpGR] = true
+
+			wg.Add(1)
+			backupRequest.ItemBlockChannel <- ItemBlockInput{
+				itemBlock:  itemBlock,
+				returnChan: itemBlockReturn,
 			}
 			itemBlock = nil
 		}
-
-		// updated total is computed as "how many items we've backed up so far, plus
-		// how many items we know of that are remaining"
-		totalItems := len(backupRequest.BackedUpItems) + (len(items) - (i + 1))
-
-		// send a progress update
-		update <- progressUpdate{
-			totalItems:    totalItems,
-			itemsBackedUp: len(backupRequest.BackedUpItems),
-		}
-
-		log.WithFields(map[string]interface{}{
-			"progress":  "",
-			"resource":  items[i].groupResource.String(),
-			"namespace": items[i].namespace,
-			"name":      items[i].name,
-		}).Infof("Backed up %d items out of an estimated total of %d (estimate will change throughout the backup)", len(backupRequest.BackedUpItems), totalItems)
 	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		wg.Wait()
+	}()
+
+	// Wait for all the ItemBlocks to be processed
+	select {
+	case <-done:
+		log.Info("done processing ItemBlocks")
+	case <-responseCtx.Done():
+		log.Info("ItemBlock processing canceled")
+	}
+	// cancel response-processing goroutine
+	responseCancel()
 
 	// no more progress updates will be sent on the 'update' channel
 	quit <- struct{}{}
@@ -525,8 +595,9 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 	if updated.Status.Progress == nil {
 		updated.Status.Progress = &velerov1api.BackupProgress{}
 	}
-	updated.Status.Progress.TotalItems = len(backupRequest.BackedUpItems)
-	updated.Status.Progress.ItemsBackedUp = len(backupRequest.BackedUpItems)
+	backedUpItems := backupRequest.BackedUpItems.Len()
+	updated.Status.Progress.TotalItems = backedUpItems
+	updated.Status.Progress.ItemsBackedUp = backedUpItems
 
 	// update the hooks execution status
 	if updated.Status.HookStatus == nil {
@@ -545,8 +616,8 @@ func (kb *kubernetesBackupper) BackupWithResolvers(
 		log.Infof("Summary for skipped PVs: %s", skippedPVSummary)
 	}
 
-	backupRequest.Status.Progress = &velerov1api.BackupProgress{TotalItems: len(backupRequest.BackedUpItems), ItemsBackedUp: len(backupRequest.BackedUpItems)}
-	log.WithField("progress", "").Infof("Backed up a total of %d items", len(backupRequest.BackedUpItems))
+	backupRequest.Status.Progress = &velerov1api.BackupProgress{TotalItems: backedUpItems, ItemsBackedUp: backedUpItems}
+	log.WithField("progress", "").Infof("Backed up a total of %d items", backedUpItems)
 
 	return nil
 }
@@ -623,12 +694,23 @@ func (kb *kubernetesBackupper) executeItemBlockActions(
 				continue
 			}
 			itemsMap[relatedItem] = append(itemsMap[relatedItem], &kubernetesResource{
-				groupResource: relatedItem.GroupResource,
-				preferredGVR:  gvr,
-				namespace:     relatedItem.Namespace,
-				name:          relatedItem.Name,
-				inItemBlock:   true,
+				groupResource:         relatedItem.GroupResource,
+				preferredGVR:          gvr,
+				namespace:             relatedItem.Namespace,
+				name:                  relatedItem.Name,
+				inItemBlockOrExcluded: true,
 			})
+
+			relatedItemMetadata, err := meta.Accessor(item)
+			if err != nil {
+				log.WithError(errors.WithStack(err)).Warn("Failed to get object metadata.")
+				continue
+			}
+			// Don't add to ItemBlock if item is excluded
+			// itemInclusionChecks logs the reason
+			if !itemBlock.itemBackupper.itemInclusionChecks(log, false, relatedItemMetadata, item, relatedItem.GroupResource) {
+				continue
+			}
 			log.Infof("adding %s %s/%s to ItemBlock", relatedItem.GroupResource, relatedItem.Namespace, relatedItem.Name)
 			itemBlock.AddUnstructured(relatedItem.GroupResource, item, gvr)
 			kb.executeItemBlockActions(log, item, relatedItem.GroupResource, relatedItem.Name, relatedItem.Namespace, itemsMap, itemBlock)
@@ -636,7 +718,7 @@ func (kb *kubernetesBackupper) executeItemBlockActions(
 	}
 }
 
-func (kb *kubernetesBackupper) backupItemBlock(ctx context.Context, itemBlock BackupItemBlock) []schema.GroupResource {
+func (kb *kubernetesBackupper) backupItemBlock(itemBlock *BackupItemBlock) []schema.GroupResource {
 	// find pods in ItemBlock
 	// filter pods based on whether they still need to be backed up
 	// this list will be used to run pre/post hooks
@@ -644,17 +726,13 @@ func (kb *kubernetesBackupper) backupItemBlock(ctx context.Context, itemBlock Ba
 	itemBlock.Log.Debug("Executing pre hooks")
 	for _, item := range itemBlock.Items {
 		if item.Gr == kuberesource.Pods {
-			metadata, key, err := kb.itemMetadataAndKey(item)
+			key, err := kb.getItemKey(item)
 			if err != nil {
 				itemBlock.Log.WithError(errors.WithStack(err)).Error("Error accessing pod metadata")
 				continue
 			}
-			// Don't run hooks if pod is excluded
-			if !itemBlock.itemBackupper.itemInclusionChecks(itemBlock.Log, false, metadata, item.Item, item.Gr) {
-				continue
-			}
 			// Don't run hooks if pod has already been backed up
-			if _, exists := itemBlock.itemBackupper.backupRequest.BackedUpItems[key]; !exists {
+			if !itemBlock.itemBackupper.backupRequest.BackedUpItems.Has(key) {
 				preHookPods = append(preHookPods, item)
 			}
 		}
@@ -663,45 +741,44 @@ func (kb *kubernetesBackupper) backupItemBlock(ctx context.Context, itemBlock Ba
 	for i, pod := range failedPods {
 		itemBlock.Log.WithError(errs[i]).WithField("name", pod.Item.GetName()).Error("Error running pre hooks for pod")
 		// if pre hook fails, flag pod as backed-up and move on
-		_, key, err := kb.itemMetadataAndKey(pod)
+		key, err := kb.getItemKey(pod)
 		if err != nil {
 			itemBlock.Log.WithError(errors.WithStack(err)).Error("Error accessing pod metadata")
 			continue
 		}
-		itemBlock.itemBackupper.backupRequest.BackedUpItems[key] = struct{}{}
+		itemBlock.itemBackupper.backupRequest.BackedUpItems.AddItem(key)
 	}
 
 	itemBlock.Log.Debug("Backing up items in BackupItemBlock")
 	var grList []schema.GroupResource
 	for _, item := range itemBlock.Items {
-		if backedUp := kb.backupItem(itemBlock.Log, item.Gr, itemBlock.itemBackupper, item.Item, item.PreferredGVR, &itemBlock); backedUp {
+		if backedUp := kb.backupItem(itemBlock.Log, item.Gr, itemBlock.itemBackupper, item.Item, item.PreferredGVR, itemBlock); backedUp {
 			grList = append(grList, item.Gr)
 		}
 	}
 
 	if len(postHookPods) > 0 {
 		itemBlock.Log.Debug("Executing post hooks")
-		itemBlock.itemBackupper.hookTracker.AsyncItemBlocks.Add(1)
-		go kb.handleItemBlockPostHooks(ctx, itemBlock, postHookPods)
+		kb.handleItemBlockPostHooks(itemBlock, postHookPods)
 	}
 
 	return grList
 }
 
-func (kb *kubernetesBackupper) itemMetadataAndKey(item itemblock.ItemBlockItem) (metav1.Object, itemKey, error) {
+func (kb *kubernetesBackupper) getItemKey(item itemblock.ItemBlockItem) (itemKey, error) {
 	metadata, err := meta.Accessor(item.Item)
 	if err != nil {
-		return nil, itemKey{}, err
+		return itemKey{}, err
 	}
 	key := itemKey{
 		resource:  resourceKey(item.Item),
 		namespace: metadata.GetNamespace(),
 		name:      metadata.GetName(),
 	}
-	return metadata, key, nil
+	return key, nil
 }
 
-func (kb *kubernetesBackupper) handleItemBlockPreHooks(itemBlock BackupItemBlock, hookPods []itemblock.ItemBlockItem) ([]itemblock.ItemBlockItem, []itemblock.ItemBlockItem, []error) {
+func (kb *kubernetesBackupper) handleItemBlockPreHooks(itemBlock *BackupItemBlock, hookPods []itemblock.ItemBlockItem) ([]itemblock.ItemBlockItem, []itemblock.ItemBlockItem, []error) {
 	var successPods []itemblock.ItemBlockItem
 	var failedPods []itemblock.ItemBlockItem
 	var errs []error
@@ -718,11 +795,11 @@ func (kb *kubernetesBackupper) handleItemBlockPreHooks(itemBlock BackupItemBlock
 }
 
 // The hooks cannot execute until the PVBs to be processed
-func (kb *kubernetesBackupper) handleItemBlockPostHooks(ctx context.Context, itemBlock BackupItemBlock, hookPods []itemblock.ItemBlockItem) {
+func (kb *kubernetesBackupper) handleItemBlockPostHooks(itemBlock *BackupItemBlock, hookPods []itemblock.ItemBlockItem) {
 	log := itemBlock.Log
-	defer itemBlock.itemBackupper.hookTracker.AsyncItemBlocks.Done()
 
-	if err := kb.waitUntilPVBsProcessed(ctx, log, itemBlock, hookPods); err != nil {
+	// the post hooks will not execute until all PVBs of the item block pods are processed
+	if err := kb.waitUntilPVBsProcessed(kb.podVolumeContext, log, itemBlock, hookPods); err != nil {
 		log.WithError(err).Error("failed to wait PVBs processed for the ItemBlock")
 		return
 	}
@@ -735,36 +812,19 @@ func (kb *kubernetesBackupper) handleItemBlockPostHooks(ctx context.Context, ite
 	}
 }
 
-func (kb *kubernetesBackupper) waitUntilPVBsProcessed(ctx context.Context, log logrus.FieldLogger, itemBlock BackupItemBlock, pods []itemblock.ItemBlockItem) error {
-	requirement, err := labels.NewRequirement(velerov1api.BackupUIDLabel, selection.Equals, []string{string(itemBlock.itemBackupper.backupRequest.UID)})
-	if err != nil {
-		return errors.Wrapf(err, "failed to create label requirement")
-	}
-	options := &kbclient.ListOptions{
-		LabelSelector: labels.NewSelector().Add(*requirement),
-	}
-	pvbList := &velerov1api.PodVolumeBackupList{}
-	if err := kb.kbClient.List(context.Background(), pvbList, options); err != nil {
-		return errors.Wrap(err, "failed to list PVBs")
-	}
-
-	podMap := map[string]struct{}{}
-	for _, pod := range pods {
-		podMap[string(pod.Item.GetUID())] = struct{}{}
-	}
-
+// wait all PVBs of the item block pods to be processed
+func (kb *kubernetesBackupper) waitUntilPVBsProcessed(ctx context.Context, log logrus.FieldLogger, itemBlock *BackupItemBlock, pods []itemblock.ItemBlockItem) error {
 	pvbMap := map[*velerov1api.PodVolumeBackup]bool{}
-	for i, pvb := range pvbList.Items {
-		if _, exist := podMap[string(pvb.Spec.Pod.UID)]; !exist {
-			continue
+	for _, pod := range pods {
+		namespace, name := pod.Item.GetNamespace(), pod.Item.GetName()
+		pvbs, err := itemBlock.itemBackupper.podVolumeBackupper.ListPodVolumeBackupsByPod(namespace, name)
+		if err != nil {
+			return errors.Wrapf(err, "failed to list PodVolumeBackups for pod %s/%s", namespace, name)
 		}
-
-		processed := false
-		if pvb.Status.Phase == velerov1api.PodVolumeBackupPhaseCompleted ||
-			pvb.Status.Phase == velerov1api.PodVolumeBackupPhaseFailed {
-			processed = true
+		for _, pvb := range pvbs {
+			pvbMap[pvb] = pvb.Status.Phase == velerov1api.PodVolumeBackupPhaseCompleted ||
+				pvb.Status.Phase == velerov1api.PodVolumeBackupPhaseFailed
 		}
-		pvbMap[&pvbList.Items[i]] = processed
 	}
 
 	checkFunc := func(context.Context) (done bool, err error) {
@@ -773,8 +833,8 @@ func (kb *kubernetesBackupper) waitUntilPVBsProcessed(ctx context.Context, log l
 			if processed {
 				continue
 			}
-			updatedPVB := &velerov1api.PodVolumeBackup{}
-			if err := kb.kbClient.Get(ctx, kbclient.ObjectKeyFromObject(pvb), updatedPVB); err != nil {
+			updatedPVB, err := itemBlock.itemBackupper.podVolumeBackupper.GetPodVolumeBackupByPodAndVolume(pvb.Spec.Pod.Namespace, pvb.Spec.Pod.Name, pvb.Spec.Volume)
+			if err != nil {
 				allProcessed = false
 				log.Infof("failed to get PVB: %v", err)
 				continue
@@ -876,7 +936,7 @@ func (kb *kubernetesBackupper) backupCRD(log logrus.FieldLogger, gr schema.Group
 	kb.backupItem(log, gvr.GroupResource(), itemBackupper, unstructured, gvr, nil)
 }
 
-func (kb *kubernetesBackupper) writeBackupVersion(tw *tar.Writer) error {
+func (kb *kubernetesBackupper) writeBackupVersion(tw tarWriter) error {
 	versionFile := filepath.Join(velerov1api.MetadataDir, "version")
 	versionString := fmt.Sprintf("%s\n", BackupFormatVersion)
 
@@ -907,7 +967,7 @@ func (kb *kubernetesBackupper) FinalizeBackup(
 ) error {
 	gzw := gzip.NewWriter(outBackupFile)
 	defer gzw.Close()
-	tw := tar.NewWriter(gzw)
+	tw := NewTarWriter(tar.NewWriter(gzw))
 	defer tw.Close()
 
 	gzr, err := gzip.NewReader(inBackupFile)
@@ -923,8 +983,6 @@ func (kb *kubernetesBackupper) FinalizeBackup(
 		log.WithError(errors.WithStack(err)).Debugf("Error from backupItemActionResolver.ResolveActions")
 		return err
 	}
-
-	backupRequest.BackedUpItems = map[itemKey]struct{}{}
 
 	// set up a temp dir for the itemCollector to use to temporarily
 	// store items as they're scraped from the API.
@@ -963,6 +1021,7 @@ func (kb *kubernetesBackupper) FinalizeBackup(
 		itemHookHandler:          &hook.NoOpItemHookHandler{},
 		podVolumeSnapshotTracker: podvolume.NewTracker(),
 		hookTracker:              hook.NewHookTracker(),
+		kubernetesBackupper:      kb,
 	}
 	updateFiles := make(map[string]FileForArchive)
 	backedUpGroupResources := map[schema.GroupResource]bool{}
@@ -970,7 +1029,7 @@ func (kb *kubernetesBackupper) FinalizeBackup(
 	unstructuredDataUploads := make([]unstructured.Unstructured, 0)
 
 	for i, item := range items {
-		log.WithFields(map[string]interface{}{
+		log.WithFields(map[string]any{
 			"progress":  "",
 			"resource":  item.groupResource.String(),
 			"namespace": item.namespace,
@@ -1010,14 +1069,15 @@ func (kb *kubernetesBackupper) FinalizeBackup(
 
 		// updated total is computed as "how many items we've backed up so far, plus
 		// how many items we know of that are remaining"
-		totalItems := len(backupRequest.BackedUpItems) + (len(items) - (i + 1))
+		backedUpItems := backupRequest.BackedUpItems.Len()
+		totalItems := backedUpItems + (len(items) - (i + 1))
 
-		log.WithFields(map[string]interface{}{
+		log.WithFields(map[string]any{
 			"progress":  "",
 			"resource":  item.groupResource.String(),
 			"namespace": item.namespace,
 			"name":      item.name,
-		}).Infof("Updated %d items out of an estimated total of %d (estimate will change throughout the backup finalizer)", len(backupRequest.BackedUpItems), totalItems)
+		}).Infof("Updated %d items out of an estimated total of %d (estimate will change throughout the backup finalizer)", backedUpItems, totalItems)
 	}
 
 	volumeInfos, err := backupStore.GetBackupVolumeInfos(backupRequest.Backup.Name)
@@ -1042,12 +1102,14 @@ func (kb *kubernetesBackupper) FinalizeBackup(
 		return err
 	}
 
-	log.WithField("progress", "").Infof("Updated a total of %d items", len(backupRequest.BackedUpItems))
+	log.WithField("progress", "").Infof("Updated a total of %d items", backupRequest.BackedUpItems.Len())
 
 	return nil
 }
 
-func buildFinalTarball(tr *tar.Reader, tw *tar.Writer, updateFiles map[string]FileForArchive) error {
+func buildFinalTarball(tr *tar.Reader, tw tarWriter, updateFiles map[string]FileForArchive) error {
+	tw.Lock()
+	defer tw.Unlock()
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
@@ -1098,10 +1160,16 @@ func buildFinalTarball(tr *tar.Reader, tw *tar.Writer, updateFiles map[string]Fi
 	return nil
 }
 
-type tarWriter interface {
-	io.Closer
-	Write([]byte) (int, error)
-	WriteHeader(*tar.Header) error
+type tarWriter struct {
+	*tar.Writer
+	*sync.Mutex
+}
+
+func NewTarWriter(writer *tar.Writer) tarWriter {
+	return tarWriter{
+		Writer: writer,
+		Mutex:  &sync.Mutex{},
+	}
 }
 
 // updateVolumeInfos update the VolumeInfos according to the AsyncOperations
@@ -1186,4 +1254,27 @@ func putVolumeInfos(
 	}
 
 	return backupStore.PutBackupVolumeInfos(backupName, backupVolumeInfoBuf)
+}
+
+func getNamespacesManagedByArgoCD(kbClient kbclient.Client, includedNamespaces []string, log logrus.FieldLogger) []string {
+	var nsManagedByArgoCD []string
+
+	for _, nsName := range includedNamespaces {
+		ns := corev1api.Namespace{}
+		if err := kbClient.Get(context.Background(), kbclient.ObjectKey{Name: nsName}, &ns); err != nil {
+			// check for only those ns that exist and are included in backup
+			// here we ignore cases like "" or "*" specified under includedNamespaces
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			log.WithError(err).Errorf("error getting namespace %s", nsName)
+			continue
+		}
+
+		nsLabels := ns.GetLabels()
+		if len(nsLabels[ArgoCDManagedByNamespaceLabel]) > 0 {
+			nsManagedByArgoCD = append(nsManagedByArgoCD, nsName)
+		}
+	}
+	return nsManagedByArgoCD
 }

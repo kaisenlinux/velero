@@ -56,6 +56,9 @@ type CSISnapshotExposeParam struct {
 	// HostingPodLabels is the labels that are going to apply to the hosting pod
 	HostingPodLabels map[string]string
 
+	// HostingPodAnnotations is the annotations that are going to apply to the hosting pod
+	HostingPodAnnotations map[string]string
+
 	// OperationTimeout specifies the time wait for resources operations in Expose
 	OperationTimeout time.Duration
 
@@ -73,6 +76,9 @@ type CSISnapshotExposeParam struct {
 
 	// Resources defines the resource requirements of the hosting pod
 	Resources corev1.ResourceRequirements
+
+	// NodeOS specifies the OS of node that the source volume is attaching
+	NodeOS string
 }
 
 // CSISnapshotExposeWaitParam define the input param for WaitExposed of CSI snapshots
@@ -97,7 +103,7 @@ type csiSnapshotExposer struct {
 	log               logrus.FieldLogger
 }
 
-func (e *csiSnapshotExposer) Expose(ctx context.Context, ownerObject corev1.ObjectReference, param interface{}) error {
+func (e *csiSnapshotExposer) Expose(ctx context.Context, ownerObject corev1.ObjectReference, param any) error {
 	csiExposeParam := param.(*CSISnapshotExposeParam)
 
 	curLog := e.log.WithFields(logrus.Fields{
@@ -208,10 +214,12 @@ func (e *csiSnapshotExposer) Expose(ctx context.Context, ownerObject corev1.Obje
 		backupPVC,
 		csiExposeParam.OperationTimeout,
 		csiExposeParam.HostingPodLabels,
+		csiExposeParam.HostingPodAnnotations,
 		csiExposeParam.Affinity,
 		csiExposeParam.Resources,
 		backupPVCReadOnly,
 		spcNoRelabeling,
+		csiExposeParam.NodeOS,
 	)
 	if err != nil {
 		return errors.Wrap(err, "error to create backup pod")
@@ -228,7 +236,7 @@ func (e *csiSnapshotExposer) Expose(ctx context.Context, ownerObject corev1.Obje
 	return nil
 }
 
-func (e *csiSnapshotExposer) GetExposed(ctx context.Context, ownerObject corev1.ObjectReference, timeout time.Duration, param interface{}) (*ExposeResult, error) {
+func (e *csiSnapshotExposer) GetExposed(ctx context.Context, ownerObject corev1.ObjectReference, timeout time.Duration, param any) (*ExposeResult, error) {
 	exposeWaitParam := param.(*CSISnapshotExposeWaitParam)
 
 	backupPodName := ownerObject.Name
@@ -277,10 +285,16 @@ func (e *csiSnapshotExposer) GetExposed(ctx context.Context, ownerObject corev1.
 
 	curLog.WithField("pod", pod.Name).Infof("Backup volume is found in pod at index %v", i)
 
+	var nodeOS *string
+	if os, found := pod.Spec.NodeSelector[kube.NodeOSLabel]; found {
+		nodeOS = &os
+	}
+
 	return &ExposeResult{ByPod: ExposeByPod{
 		HostingPod:       pod,
 		HostingContainer: containerName,
 		VolumeName:       volumeName,
+		NodeOS:           nodeOS,
 	}}, nil
 }
 
@@ -513,22 +527,24 @@ func (e *csiSnapshotExposer) createBackupPod(
 	backupPVC *corev1.PersistentVolumeClaim,
 	operationTimeout time.Duration,
 	label map[string]string,
+	annotation map[string]string,
 	affinity *kube.LoadAffinity,
 	resources corev1.ResourceRequirements,
 	backupPVCReadOnly bool,
 	spcNoRelabeling bool,
+	nodeOS string,
 ) (*corev1.Pod, error) {
 	podName := ownerObject.Name
 
 	containerName := string(ownerObject.UID)
 	volumeName := string(ownerObject.UID)
 
-	podInfo, err := getInheritedPodInfo(ctx, e.kubeClient, ownerObject.Namespace)
+	podInfo, err := getInheritedPodInfo(ctx, e.kubeClient, ownerObject.Namespace, nodeOS)
 	if err != nil {
 		return nil, errors.Wrap(err, "error to get inherited pod info from node-agent")
 	}
 
-	var gracePeriod int64 = 0
+	var gracePeriod int64
 	volumeMounts, volumeDevices, volumePath := kube.MakePodPVCAttachment(volumeName, backupPVC.Spec.VolumeMode, backupPVCReadOnly)
 	volumeMounts = append(volumeMounts, podInfo.volumeMounts...)
 
@@ -567,11 +583,46 @@ func (e *csiSnapshotExposer) createBackupPod(
 	args = append(args, podInfo.logFormatArgs...)
 	args = append(args, podInfo.logLevelArgs...)
 
-	userID := int64(0)
-
 	affinityList := make([]*kube.LoadAffinity, 0)
 	if affinity != nil {
 		affinityList = append(affinityList, affinity)
+	}
+
+	var securityCtx *corev1.PodSecurityContext
+	nodeSelector := map[string]string{}
+	podOS := corev1.PodOS{}
+	toleration := []corev1.Toleration{}
+	if nodeOS == kube.NodeOSWindows {
+		userID := "ContainerAdministrator"
+		securityCtx = &corev1.PodSecurityContext{
+			WindowsOptions: &corev1.WindowsSecurityContextOptions{
+				RunAsUserName: &userID,
+			},
+		}
+
+		nodeSelector[kube.NodeOSLabel] = kube.NodeOSWindows
+		podOS.Name = kube.NodeOSWindows
+
+		toleration = append(toleration, corev1.Toleration{
+			Key:      "os",
+			Operator: "Equal",
+			Effect:   "NoSchedule",
+			Value:    "windows",
+		})
+	} else {
+		userID := int64(0)
+		securityCtx = &corev1.PodSecurityContext{
+			RunAsUser: &userID,
+		}
+
+		if spcNoRelabeling {
+			securityCtx.SELinuxOptions = &corev1.SELinuxOptions{
+				Type: "spc_t",
+			}
+		}
+
+		nodeSelector[kube.NodeOSLabel] = kube.NodeOSLinux
+		podOS.Name = kube.NodeOSLinux
 	}
 
 	pod := &corev1.Pod{
@@ -587,7 +638,8 @@ func (e *csiSnapshotExposer) createBackupPod(
 					Controller: boolptr.True(),
 				},
 			},
-			Labels: label,
+			Labels:      label,
+			Annotations: annotation,
 		},
 		Spec: corev1.PodSpec{
 			TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
@@ -602,7 +654,9 @@ func (e *csiSnapshotExposer) createBackupPod(
 					},
 				},
 			},
-			Affinity: kube.ToSystemAffinity(affinityList),
+			NodeSelector: nodeSelector,
+			OS:           &podOS,
+			Affinity:     kube.ToSystemAffinity(affinityList),
 			Containers: []corev1.Container{
 				{
 					Name:            containerName,
@@ -617,6 +671,7 @@ func (e *csiSnapshotExposer) createBackupPod(
 					VolumeMounts:  volumeMounts,
 					VolumeDevices: volumeDevices,
 					Env:           podInfo.env,
+					EnvFrom:       podInfo.envFrom,
 					Resources:     resources,
 				},
 			},
@@ -624,16 +679,10 @@ func (e *csiSnapshotExposer) createBackupPod(
 			TerminationGracePeriodSeconds: &gracePeriod,
 			Volumes:                       volumes,
 			RestartPolicy:                 corev1.RestartPolicyNever,
-			SecurityContext: &corev1.PodSecurityContext{
-				RunAsUser: &userID,
-			},
+			SecurityContext:               securityCtx,
+			Tolerations:                   toleration,
+			ImagePullSecrets:              podInfo.imagePullSecrets,
 		},
-	}
-
-	if spcNoRelabeling {
-		pod.Spec.SecurityContext.SELinuxOptions = &corev1.SELinuxOptions{
-			Type: "spc_t",
-		}
 	}
 
 	return e.kubeClient.CoreV1().Pods(ownerObject.Namespace).Create(ctx, pod, metav1.CreateOptions{})

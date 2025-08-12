@@ -137,7 +137,9 @@ func TestProcessBackupNonProcessedItems(t *testing.T) {
 				kbClient:   velerotest.NewFakeControllerRuntimeClient(t),
 				formatFlag: formatFlag,
 				logger:     logger,
+				workerPool: pkgbackup.StartItemBlockWorkerPool(context.Background(), 1, logger),
 			}
+			defer c.workerPool.Stop()
 			if test.backup != nil {
 				require.NoError(t, c.kbClient.Create(context.Background(), test.backup))
 			}
@@ -154,7 +156,7 @@ func TestProcessBackupNonProcessedItems(t *testing.T) {
 }
 
 func TestProcessBackupValidationFailures(t *testing.T) {
-	defaultBackupLocation := builder.ForBackupStorageLocation("velero", "loc-1").Result()
+	defaultBackupLocation := builder.ForBackupStorageLocation("velero", "loc-1").Phase(velerov1api.BackupStorageLocationPhaseAvailable).Result()
 
 	tests := []struct {
 		name           string
@@ -182,7 +184,7 @@ func TestProcessBackupValidationFailures(t *testing.T) {
 		{
 			name:           "backup for read-only backup location fails validation",
 			backup:         defaultBackup().StorageLocation("read-only").Result(),
-			backupLocation: builder.ForBackupStorageLocation("velero", "read-only").AccessMode(velerov1api.BackupStorageLocationAccessModeReadOnly).Result(),
+			backupLocation: builder.ForBackupStorageLocation("velero", "read-only").AccessMode(velerov1api.BackupStorageLocationAccessModeReadOnly).Phase(velerov1api.BackupStorageLocationPhaseAvailable).Result(),
 			expectedErrs:   []string{"backup can't be created because backup storage location read-only is currently in read-only mode"},
 		},
 		{
@@ -197,6 +199,12 @@ func TestProcessBackupValidationFailures(t *testing.T) {
 			backup:         defaultBackup().IncludeClusterResources(true).IncludedNamespaceScopedResources("Deployment").IncludedNamespaces("default").Result(),
 			backupLocation: defaultBackupLocation,
 			expectedErrs:   []string{"include-resources, exclude-resources and include-cluster-resources are old filter parameters.\ninclude-cluster-scoped-resources, exclude-cluster-scoped-resources, include-namespace-scoped-resources and exclude-namespace-scoped-resources are new filter parameters.\nThey cannot be used together"},
+		},
+		{
+			name:           "BSL in unavailable state",
+			backup:         defaultBackup().StorageLocation("unavailable").Result(),
+			backupLocation: builder.ForBackupStorageLocation("velero", "unavailable").Phase(velerov1api.BackupStorageLocationPhaseUnavailable).Result(),
+			expectedErrs:   []string{"backup can't be created because BackupStorageLocation unavailable is in Unavailable status. please create a new backup after the BSL becomes available"},
 		},
 	}
 
@@ -226,7 +234,9 @@ func TestProcessBackupValidationFailures(t *testing.T) {
 				clock:                 &clock.RealClock{},
 				formatFlag:            formatFlag,
 				metrics:               metrics.NewServerMetrics(),
+				workerPool:            pkgbackup.StartItemBlockWorkerPool(context.Background(), 1, logger),
 			}
+			defer c.workerPool.Stop()
 
 			require.NotNil(t, test.backup)
 			require.NoError(t, c.kbClient.Create(context.Background(), test.backup))
@@ -289,7 +299,9 @@ func TestBackupLocationLabel(t *testing.T) {
 				defaultBackupLocation: test.backupLocation.Name,
 				clock:                 &clock.RealClock{},
 				formatFlag:            formatFlag,
+				workerPool:            pkgbackup.StartItemBlockWorkerPool(context.Background(), 1, logger),
 			}
+			defer c.workerPool.Stop()
 
 			res := c.prepareBackupRequest(test.backup, logger)
 			assert.NotNil(t, res)
@@ -384,7 +396,9 @@ func Test_prepareBackupRequest_BackupStorageLocation(t *testing.T) {
 				defaultBackupTTL:      defaultBackupTTL.Duration,
 				clock:                 testclocks.NewFakeClock(now),
 				formatFlag:            formatFlag,
+				workerPool:            pkgbackup.StartItemBlockWorkerPool(context.Background(), 1, logger),
 			}
+			defer c.workerPool.Stop()
 
 			test.backup.Spec.StorageLocation = test.backupLocationNameInBackup
 
@@ -460,7 +474,9 @@ func TestDefaultBackupTTL(t *testing.T) {
 				defaultBackupTTL: defaultBackupTTL.Duration,
 				clock:            testclocks.NewFakeClock(now),
 				formatFlag:       formatFlag,
+				workerPool:       pkgbackup.StartItemBlockWorkerPool(context.Background(), 1, logger),
 			}
+			defer c.workerPool.Stop()
 
 			res := c.prepareBackupRequest(test.backup, logger)
 			assert.NotNil(t, res)
@@ -560,7 +576,9 @@ func TestDefaultVolumesToResticDeprecation(t *testing.T) {
 				clock:                    &clock.RealClock{},
 				formatFlag:               formatFlag,
 				defaultVolumesToFsBackup: test.globalVal,
+				workerPool:               pkgbackup.StartItemBlockWorkerPool(context.Background(), 1, logger),
 			}
+			defer c.workerPool.Stop()
 
 			res := c.prepareBackupRequest(test.backup, logger)
 			assert.NotNil(t, res)
@@ -581,7 +599,7 @@ func TestDefaultVolumesToResticDeprecation(t *testing.T) {
 }
 
 func TestProcessBackupCompletions(t *testing.T) {
-	defaultBackupLocation := builder.ForBackupStorageLocation("velero", "loc-1").Default(true).Bucket("store-1").Result()
+	defaultBackupLocation := builder.ForBackupStorageLocation("velero", "loc-1").Default(true).Bucket("store-1").Phase(velerov1api.BackupStorageLocationPhaseAvailable).Result()
 
 	now, err := time.Parse(time.RFC1123Z, time.RFC1123Z)
 	require.NoError(t, err)
@@ -641,7 +659,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 		{
 			name:                     "backup with a specific backup location keeps it",
 			backup:                   defaultBackup().StorageLocation("alt-loc").Result(),
-			backupLocation:           builder.ForBackupStorageLocation("velero", "alt-loc").Bucket("store-1").Result(),
+			backupLocation:           builder.ForBackupStorageLocation("velero", "alt-loc").Bucket("store-1").Phase(velerov1api.BackupStorageLocationPhaseAvailable).Result(),
 			defaultVolumesToFsBackup: false,
 			expectedResult: &velerov1api.Backup{
 				TypeMeta: metav1.TypeMeta{
@@ -681,6 +699,7 @@ func TestProcessBackupCompletions(t *testing.T) {
 			backupLocation: builder.ForBackupStorageLocation("velero", "read-write").
 				Bucket("store-1").
 				AccessMode(velerov1api.BackupStorageLocationAccessModeReadWrite).
+				Phase(velerov1api.BackupStorageLocationPhaseAvailable).
 				Result(),
 			defaultVolumesToFsBackup: true,
 			expectedResult: &velerov1api.Backup{
@@ -1345,7 +1364,9 @@ func TestProcessBackupCompletions(t *testing.T) {
 				backupper:                backupper,
 				formatFlag:               formatFlag,
 				globalCRClient:           fakeGlobalClient,
+				workerPool:               pkgbackup.StartItemBlockWorkerPool(context.Background(), 1, logger),
 			}
+			defer c.workerPool.Stop()
 
 			pluginManager.On("GetBackupItemActionsV2").Return(nil, nil)
 			pluginManager.On("GetItemBlockActions").Return(nil, nil)
@@ -1401,11 +1422,13 @@ func TestProcessBackupCompletions(t *testing.T) {
 }
 
 func TestValidateAndGetSnapshotLocations(t *testing.T) {
+	defaultBSL := builder.ForBackupStorageLocation(velerov1api.DefaultNamespace, "bsl").Phase(velerov1api.BackupStorageLocationPhaseAvailable).Result()
 	tests := []struct {
 		name                                string
 		backup                              *velerov1api.Backup
 		locations                           []*velerov1api.VolumeSnapshotLocation
 		defaultLocations                    map[string]string
+		bsl                                 velerov1api.BackupStorageLocation
 		expectedVolumeSnapshotLocationNames []string // adding these in the expected order will allow to test with better msgs in case of a test failure
 		expectedErrors                      string
 		expectedSuccess                     bool
@@ -1419,6 +1442,7 @@ func TestValidateAndGetSnapshotLocations(t *testing.T) {
 				builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "some-name").Provider("fake-provider").Result(),
 			},
 			expectedErrors: "a VolumeSnapshotLocation CRD for the location random-name with the name specified in the backup spec needs to be created before this snapshot can be executed. Error: volumesnapshotlocations.velero.io \"random-name\" not found", expectedSuccess: false,
+			bsl: *defaultBSL,
 		},
 		{
 			name:   "duplicate locationName per provider: should filter out dups",
@@ -1429,6 +1453,7 @@ func TestValidateAndGetSnapshotLocations(t *testing.T) {
 			},
 			expectedVolumeSnapshotLocationNames: []string{"aws-us-west-1"},
 			expectedSuccess:                     true,
+			bsl:                                 *defaultBSL,
 		},
 		{
 			name:   "multiple non-dupe location names per provider should error",
@@ -1440,6 +1465,7 @@ func TestValidateAndGetSnapshotLocations(t *testing.T) {
 			},
 			expectedErrors:  "more than one VolumeSnapshotLocation name specified for provider aws: aws-us-west-1; unexpected name was aws-us-east-1",
 			expectedSuccess: false,
+			bsl:             *defaultBSL,
 		},
 		{
 			name:   "no location name for the provider exists, only one VSL for the provider: use it",
@@ -1449,6 +1475,7 @@ func TestValidateAndGetSnapshotLocations(t *testing.T) {
 			},
 			expectedVolumeSnapshotLocationNames: []string{"aws-us-east-1"},
 			expectedSuccess:                     true,
+			bsl:                                 *defaultBSL,
 		},
 		{
 			name:   "no location name for the provider exists, no default, more than one VSL for the provider: error",
@@ -1458,6 +1485,7 @@ func TestValidateAndGetSnapshotLocations(t *testing.T) {
 				builder.ForVolumeSnapshotLocation(velerov1api.DefaultNamespace, "aws-us-west-1").Provider("aws").Result(),
 			},
 			expectedErrors: "provider aws has more than one possible volume snapshot location, and none were specified explicitly or as a default",
+			bsl:            *defaultBSL,
 		},
 		{
 			name:             "no location name for the provider exists, more than one VSL for the provider: the provider's default should be added",
@@ -1469,11 +1497,13 @@ func TestValidateAndGetSnapshotLocations(t *testing.T) {
 			},
 			expectedVolumeSnapshotLocationNames: []string{"aws-us-east-1"},
 			expectedSuccess:                     true,
+			bsl:                                 *defaultBSL,
 		},
 		{
 			name:            "no existing location name and no default location name given",
 			backup:          defaultBackup().Phase(velerov1api.BackupPhaseNew).Result(),
 			expectedSuccess: true,
+			bsl:             *defaultBSL,
 		},
 		{
 			name:             "multiple location names for a provider, default location name for another provider",
@@ -1485,6 +1515,7 @@ func TestValidateAndGetSnapshotLocations(t *testing.T) {
 			},
 			expectedVolumeSnapshotLocationNames: []string{"aws-us-west-1", "some-name"},
 			expectedSuccess:                     true,
+			bsl:                                 *defaultBSL,
 		},
 		{
 			name:   "location name does not correspond to any existing location and snapshotvolume disabled; should return error",
@@ -1496,6 +1527,7 @@ func TestValidateAndGetSnapshotLocations(t *testing.T) {
 			},
 			expectedVolumeSnapshotLocationNames: nil,
 			expectedErrors:                      "a VolumeSnapshotLocation CRD for the location random-name with the name specified in the backup spec needs to be created before this snapshot can be executed. Error: volumesnapshotlocations.velero.io \"random-name\" not found", expectedSuccess: false,
+			bsl: *defaultBSL,
 		},
 		{
 			name:   "duplicate locationName per provider and snapshotvolume disabled; should return only one BSL",
@@ -1506,6 +1538,7 @@ func TestValidateAndGetSnapshotLocations(t *testing.T) {
 			},
 			expectedVolumeSnapshotLocationNames: []string{"aws-us-west-1"},
 			expectedSuccess:                     true,
+			bsl:                                 *defaultBSL,
 		},
 		{
 			name:   "no location name for the provider exists, only one VSL created and snapshotvolume disabled; should return the VSL",
@@ -1515,6 +1548,7 @@ func TestValidateAndGetSnapshotLocations(t *testing.T) {
 			},
 			expectedVolumeSnapshotLocationNames: []string{"aws-us-east-1"},
 			expectedSuccess:                     true,
+			bsl:                                 *defaultBSL,
 		},
 		{
 			name:   "multiple location names for a provider, no default location and backup has no location defined, but snapshotvolume disabled, should return error",
@@ -1525,6 +1559,7 @@ func TestValidateAndGetSnapshotLocations(t *testing.T) {
 			},
 			expectedVolumeSnapshotLocationNames: nil,
 			expectedErrors:                      "provider aws has more than one possible volume snapshot location, and none were specified explicitly or as a default",
+			bsl:                                 *defaultBSL,
 		},
 	}
 
@@ -1539,7 +1574,9 @@ func TestValidateAndGetSnapshotLocations(t *testing.T) {
 				logger:                   logger,
 				defaultSnapshotLocations: test.defaultLocations,
 				kbClient:                 velerotest.NewFakeControllerRuntimeClient(t),
+				workerPool:               pkgbackup.StartItemBlockWorkerPool(context.Background(), 1, logger),
 			}
+			defer c.workerPool.Stop()
 
 			// set up a Backup object to represent what we expect to be passed to backupper.Backup()
 			backup := test.backup.DeepCopy()

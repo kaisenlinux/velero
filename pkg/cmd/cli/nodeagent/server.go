@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bombsimon/logrusr/v3"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
@@ -38,11 +39,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	snapshotv1client "github.com/kubernetes-csi/external-snapshotter/client/v7/clientset/versioned"
@@ -78,6 +79,8 @@ const (
 	// defaultCredentialsDirectory is the path on disk where credential
 	// files will be written to
 	defaultCredentialsDirectory = "/tmp/credentials"
+
+	defaultHostPodsPath = "/host_pods"
 
 	defaultResourceTimeout         = 10 * time.Minute
 	defaultDataMoverPrepareTimeout = 30 * time.Minute
@@ -156,7 +159,8 @@ func newNodeAgentServer(logger logrus.FieldLogger, factory client.Factory, confi
 		return nil, err
 	}
 
-	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+	ctrl.SetLogger(logrusr.New(logger))
+	klog.SetLogger(logrusr.New(logger)) // klog.Logger is used by k8s.io/client-go
 
 	if err := velerov1api.AddToScheme(scheme); err != nil {
 		cancelFunc()
@@ -200,13 +204,31 @@ func newNodeAgentServer(logger logrus.FieldLogger, factory client.Factory, confi
 			},
 		},
 	}
-	mgr, err := ctrl.NewManager(clientConfig, ctrl.Options{
-		Scheme: scheme,
-		Cache:  cacheOption,
-	})
+
+	var mgr manager.Manager
+	retry := 10
+	for {
+		mgr, err = ctrl.NewManager(clientConfig, ctrl.Options{
+			Scheme: scheme,
+			Cache:  cacheOption,
+		})
+		if err == nil {
+			break
+		}
+
+		retry--
+		if retry == 0 {
+			break
+		}
+
+		logger.WithError(err).Warn("Failed to create controller manager, need retry")
+
+		time.Sleep(time.Second)
+	}
+
 	if err != nil {
 		cancelFunc()
-		return nil, err
+		return nil, errors.Wrap(err, "error creating controller manager")
 	}
 
 	s := &nodeAgentServer{
@@ -335,7 +357,13 @@ func (s *nodeAgentServer) run() {
 		s.logger.WithError(err).Fatal("Unable to create the data upload controller")
 	}
 
-	dataDownloadReconciler := controller.NewDataDownloadReconciler(s.mgr.GetClient(), s.mgr, s.kubeClient, s.dataPathMgr, podResources, s.nodeName, s.config.dataMoverPrepareTimeout, s.logger, s.metrics)
+	var restorePVCConfig nodeagent.RestorePVC
+	if s.dataPathConfigs != nil && s.dataPathConfigs.RestorePVCConfig != nil {
+		restorePVCConfig = *s.dataPathConfigs.RestorePVCConfig
+		s.logger.Infof("Using customized restorePVC config %v", restorePVCConfig)
+	}
+
+	dataDownloadReconciler := controller.NewDataDownloadReconciler(s.mgr.GetClient(), s.mgr, s.kubeClient, s.dataPathMgr, restorePVCConfig, podResources, s.nodeName, s.config.dataMoverPrepareTimeout, s.logger, s.metrics)
 	if err = dataDownloadReconciler.SetupWithManager(s.mgr); err != nil {
 		s.logger.WithError(err).Fatal("Unable to create the data download controller")
 	}
@@ -388,8 +416,12 @@ func (s *nodeAgentServer) waitCacheForResume() error {
 // validatePodVolumesHostPath validates that the pod volumes path contains a
 // directory for each Pod running on this node
 func (s *nodeAgentServer) validatePodVolumesHostPath(client kubernetes.Interface) error {
-	files, err := s.fileSystem.ReadDir("/host_pods/")
+	files, err := s.fileSystem.ReadDir(defaultHostPodsPath)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			s.logger.Warnf("Pod volumes host path [%s] doesn't exist, fs-backup is disabled", defaultHostPodsPath)
+			return nil
+		}
 		return errors.Wrap(err, "could not read pod volumes host path")
 	}
 
@@ -420,7 +452,7 @@ func (s *nodeAgentServer) validatePodVolumesHostPath(client kubernetes.Interface
 			valid = false
 			s.logger.WithFields(logrus.Fields{
 				"pod":  fmt.Sprintf("%s/%s", pod.GetNamespace(), pod.GetName()),
-				"path": "/host_pods/" + dirName,
+				"path": defaultHostPodsPath + "/" + dirName,
 			}).Debug("could not find volumes for pod in host path")
 		}
 	}

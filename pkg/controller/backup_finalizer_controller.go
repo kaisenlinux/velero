@@ -33,6 +33,7 @@ import (
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	pkgbackup "github.com/vmware-tanzu/velero/pkg/backup"
 	"github.com/vmware-tanzu/velero/pkg/client"
+	"github.com/vmware-tanzu/velero/pkg/constant"
 	"github.com/vmware-tanzu/velero/pkg/itemoperation"
 	"github.com/vmware-tanzu/velero/pkg/kuberesource"
 	"github.com/vmware-tanzu/velero/pkg/metrics"
@@ -160,6 +161,7 @@ func (r *backupFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		Backup:           backup,
 		StorageLocation:  location,
 		SkippedPVTracker: pkgbackup.NewSkipPVTracker(),
+		BackedUpItems:    pkgbackup.NewBackedUpItemsMap(),
 	}
 	var outBackupFile *os.File
 	if len(operations) > 0 {
@@ -237,6 +239,7 @@ func (r *backupFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 func (r *backupFinalizerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&velerov1api.Backup{}).
+		Named(constant.ControllerBackupFinalizer).
 		Complete(r)
 }
 

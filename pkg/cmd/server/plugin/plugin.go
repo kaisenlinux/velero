@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/cobra"
 	apiextensions "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 
+	"github.com/vmware-tanzu/velero/pkg/constant"
 	"github.com/vmware-tanzu/velero/pkg/datamover"
 
 	dia "github.com/vmware-tanzu/velero/internal/delete/actions/csi"
@@ -90,10 +91,6 @@ func NewCommand(f client.Factory) *cobra.Command {
 					newAddPVCFromPodRestoreItemAction,
 				).
 				RegisterRestoreItemAction(
-					"velero.io/add-pv-from-pvc",
-					newAddPVFromPVCRestoreItemAction,
-				).
-				RegisterRestoreItemAction(
 					"velero.io/change-storage-class",
 					newChangeStorageClassRestoreItemAction(f),
 				).
@@ -114,8 +111,8 @@ func NewCommand(f client.Factory) *cobra.Command {
 					newCRDV1PreserveUnknownFieldsItemAction,
 				).
 				RegisterRestoreItemAction(
-					"velero.io/change-pvc-node-selector",
-					newChangePVCNodeSelectorItemAction(f),
+					"velero.io/pvc",
+					newPVCRestoreItemAction(f),
 				).
 				RegisterRestoreItemAction(
 					"velero.io/apiservice",
@@ -138,10 +135,6 @@ func NewCommand(f client.Factory) *cobra.Command {
 					newDateUploadDeleteItemAction(f),
 				).
 				RegisterDeleteItemAction(
-					"velero.io/csi-volumesnapshot-delete",
-					newVolumeSnapshotDeleteItemAction(f),
-				).
-				RegisterDeleteItemAction(
 					"velero.io/csi-volumesnapshotcontent-delete",
 					newVolumeSnapshotContentDeleteItemAction(f),
 				).
@@ -162,16 +155,16 @@ func NewCommand(f client.Factory) *cobra.Command {
 					newVolumeSnapshotClassBackupItemAction,
 				).
 				RegisterRestoreItemActionV2(
-					"velero.io/csi-pvc-restorer",
+					constant.PluginCSIPVCRestoreRIA,
 					newPvcRestoreItemAction(f),
 				).
 				RegisterRestoreItemActionV2(
-					"velero.io/csi-volumesnapshot-restorer",
+					constant.PluginCsiVolumeSnapshotRestoreRIA,
 					newVolumeSnapshotRestoreItemAction(f),
 				).
 				RegisterRestoreItemActionV2(
 					"velero.io/csi-volumesnapshotcontent-restorer",
-					newVolumeSnapshotContentRestoreItemAction,
+					newVolumeSnapshotContentRestoreItemAction(f),
 				).
 				RegisterRestoreItemActionV2(
 					"velero.io/csi-volumesnapshotclass-restorer",
@@ -208,23 +201,28 @@ func NewCommand(f client.Factory) *cobra.Command {
 	return c
 }
 
-func newPVBackupItemAction(logger logrus.FieldLogger) (interface{}, error) {
+func newPVBackupItemAction(logger logrus.FieldLogger) (any, error) {
 	return bia.NewPVCAction(logger), nil
 }
 
-func newPodBackupItemAction(logger logrus.FieldLogger) (interface{}, error) {
+func newPodBackupItemAction(logger logrus.FieldLogger) (any, error) {
 	return bia.NewPodAction(logger), nil
 }
 
 func newServiceAccountBackupItemAction(f client.Factory) plugincommon.HandlerInitializer {
-	return func(logger logrus.FieldLogger) (interface{}, error) {
+	return func(logger logrus.FieldLogger) (any, error) {
 		// TODO(ncdc): consider a k8s style WantsKubernetesClientSet initialization approach
 		clientset, err := f.KubeClient()
 		if err != nil {
 			return nil, err
 		}
 
-		discoveryHelper, err := velerodiscovery.NewHelper(clientset.Discovery(), logger)
+		discoveryClient, err := f.DiscoveryClient()
+		if err != nil {
+			return nil, err
+		}
+
+		discoveryHelper, err := velerodiscovery.NewHelper(discoveryClient, logger)
 		if err != nil {
 			return nil, err
 		}
@@ -242,7 +240,7 @@ func newServiceAccountBackupItemAction(f client.Factory) plugincommon.HandlerIni
 }
 
 func newRemapCRDVersionAction(f client.Factory) plugincommon.HandlerInitializer {
-	return func(logger logrus.FieldLogger) (interface{}, error) {
+	return func(logger logrus.FieldLogger) (any, error) {
 		config, err := f.ClientConfig()
 		if err != nil {
 			return nil, err
@@ -253,11 +251,11 @@ func newRemapCRDVersionAction(f client.Factory) plugincommon.HandlerInitializer 
 			return nil, err
 		}
 
-		clientset, err := f.KubeClient()
+		discoveryClient, err := f.DiscoveryClient()
 		if err != nil {
 			return nil, err
 		}
-		discoveryHelper, err := velerodiscovery.NewHelper(clientset.Discovery(), logger)
+		discoveryHelper, err := velerodiscovery.NewHelper(discoveryClient, logger)
 		if err != nil {
 			return nil, err
 		}
@@ -266,20 +264,20 @@ func newRemapCRDVersionAction(f client.Factory) plugincommon.HandlerInitializer 
 	}
 }
 
-func newJobRestoreItemAction(logger logrus.FieldLogger) (interface{}, error) {
+func newJobRestoreItemAction(logger logrus.FieldLogger) (any, error) {
 	return ria.NewJobAction(logger), nil
 }
 
-func newPodRestoreItemAction(logger logrus.FieldLogger) (interface{}, error) {
+func newPodRestoreItemAction(logger logrus.FieldLogger) (any, error) {
 	return ria.NewPodAction(logger), nil
 }
 
-func newInitRestoreHookPodAction(logger logrus.FieldLogger) (interface{}, error) {
+func newInitRestoreHookPodAction(logger logrus.FieldLogger) (any, error) {
 	return ria.NewInitRestoreHookPodAction(logger), nil
 }
 
 func newPodVolumeRestoreItemAction(f client.Factory) plugincommon.HandlerInitializer {
-	return func(logger logrus.FieldLogger) (interface{}, error) {
+	return func(logger logrus.FieldLogger) (any, error) {
 		client, err := f.KubeClient()
 		if err != nil {
 			return nil, err
@@ -290,32 +288,28 @@ func newPodVolumeRestoreItemAction(f client.Factory) plugincommon.HandlerInitial
 			return nil, err
 		}
 
-		return ria.NewPodVolumeRestoreAction(logger, client.CoreV1().ConfigMaps(f.Namespace()), crClient), nil
+		return ria.NewPodVolumeRestoreAction(logger, client.CoreV1().ConfigMaps(f.Namespace()), crClient, f.Namespace())
 	}
 }
 
-func newServiceRestoreItemAction(logger logrus.FieldLogger) (interface{}, error) {
+func newServiceRestoreItemAction(logger logrus.FieldLogger) (any, error) {
 	return ria.NewServiceAction(logger), nil
 }
 
-func newServiceAccountRestoreItemAction(logger logrus.FieldLogger) (interface{}, error) {
+func newServiceAccountRestoreItemAction(logger logrus.FieldLogger) (any, error) {
 	return ria.NewServiceAccountAction(logger), nil
 }
 
-func newAddPVCFromPodRestoreItemAction(logger logrus.FieldLogger) (interface{}, error) {
+func newAddPVCFromPodRestoreItemAction(logger logrus.FieldLogger) (any, error) {
 	return ria.NewAddPVCFromPodAction(logger), nil
 }
 
-func newAddPVFromPVCRestoreItemAction(logger logrus.FieldLogger) (interface{}, error) {
-	return ria.NewAddPVFromPVCAction(logger), nil
-}
-
-func newCRDV1PreserveUnknownFieldsItemAction(logger logrus.FieldLogger) (interface{}, error) {
+func newCRDV1PreserveUnknownFieldsItemAction(logger logrus.FieldLogger) (any, error) {
 	return ria.NewCRDV1PreserveUnknownFieldsAction(logger), nil
 }
 
 func newChangeStorageClassRestoreItemAction(f client.Factory) plugincommon.HandlerInitializer {
-	return func(logger logrus.FieldLogger) (interface{}, error) {
+	return func(logger logrus.FieldLogger) (any, error) {
 		client, err := f.KubeClient()
 		if err != nil {
 			return nil, err
@@ -330,7 +324,7 @@ func newChangeStorageClassRestoreItemAction(f client.Factory) plugincommon.Handl
 }
 
 func newChangeImageNameRestoreItemAction(f client.Factory) plugincommon.HandlerInitializer {
-	return func(logger logrus.FieldLogger) (interface{}, error) {
+	return func(logger logrus.FieldLogger) (any, error) {
 		client, err := f.KubeClient()
 		if err != nil {
 			return nil, err
@@ -342,22 +336,22 @@ func newChangeImageNameRestoreItemAction(f client.Factory) plugincommon.HandlerI
 		), nil
 	}
 }
-func newRoleBindingItemAction(logger logrus.FieldLogger) (interface{}, error) {
+func newRoleBindingItemAction(logger logrus.FieldLogger) (any, error) {
 	return ria.NewRoleBindingAction(logger), nil
 }
 
-func newClusterRoleBindingItemAction(logger logrus.FieldLogger) (interface{}, error) {
+func newClusterRoleBindingItemAction(logger logrus.FieldLogger) (any, error) {
 	return ria.NewClusterRoleBindingAction(logger), nil
 }
 
-func newChangePVCNodeSelectorItemAction(f client.Factory) plugincommon.HandlerInitializer {
-	return func(logger logrus.FieldLogger) (interface{}, error) {
+func newPVCRestoreItemAction(f client.Factory) plugincommon.HandlerInitializer {
+	return func(logger logrus.FieldLogger) (any, error) {
 		client, err := f.KubeClient()
 		if err != nil {
 			return nil, err
 		}
 
-		return ria.NewChangePVCNodeSelectorAction(
+		return ria.NewPVCAction(
 			logger,
 			client.CoreV1().ConfigMaps(f.Namespace()),
 			client.CoreV1().Nodes(),
@@ -365,16 +359,16 @@ func newChangePVCNodeSelectorItemAction(f client.Factory) plugincommon.HandlerIn
 	}
 }
 
-func newAPIServiceRestoreItemAction(logger logrus.FieldLogger) (interface{}, error) {
+func newAPIServiceRestoreItemAction(logger logrus.FieldLogger) (any, error) {
 	return ria.NewAPIServiceAction(logger), nil
 }
 
-func newAdmissionWebhookConfigurationAction(logger logrus.FieldLogger) (interface{}, error) {
+func newAdmissionWebhookConfigurationAction(logger logrus.FieldLogger) (any, error) {
 	return ria.NewAdmissionWebhookConfigurationAction(logger), nil
 }
 
 func newSecretRestoreItemAction(f client.Factory) plugincommon.HandlerInitializer {
-	return func(logger logrus.FieldLogger) (interface{}, error) {
+	return func(logger logrus.FieldLogger) (any, error) {
 		client, err := f.KubebuilderClient()
 		if err != nil {
 			return nil, err
@@ -384,7 +378,7 @@ func newSecretRestoreItemAction(f client.Factory) plugincommon.HandlerInitialize
 }
 
 func newDataUploadRetrieveAction(f client.Factory) plugincommon.HandlerInitializer {
-	return func(logger logrus.FieldLogger) (interface{}, error) {
+	return func(logger logrus.FieldLogger) (any, error) {
 		client, err := f.KubebuilderClient()
 		if err != nil {
 			return nil, err
@@ -395,7 +389,7 @@ func newDataUploadRetrieveAction(f client.Factory) plugincommon.HandlerInitializ
 }
 
 func newDateUploadDeleteItemAction(f client.Factory) plugincommon.HandlerInitializer {
-	return func(logger logrus.FieldLogger) (interface{}, error) {
+	return func(logger logrus.FieldLogger) (any, error) {
 		client, err := f.KubebuilderClient()
 		if err != nil {
 			return nil, err
@@ -416,19 +410,15 @@ func newVolumeSnapshotBackupItemAction(f client.Factory) plugincommon.HandlerIni
 	return csibia.NewVolumeSnapshotBackupItemAction(f)
 }
 
-func newVolumeSnapshotContentBackupItemAction(logger logrus.FieldLogger) (interface{}, error) {
+func newVolumeSnapshotContentBackupItemAction(logger logrus.FieldLogger) (any, error) {
 	return csibia.NewVolumeSnapshotContentBackupItemAction(logger)
 }
 
-func newVolumeSnapshotClassBackupItemAction(logger logrus.FieldLogger) (interface{}, error) {
+func newVolumeSnapshotClassBackupItemAction(logger logrus.FieldLogger) (any, error) {
 	return csibia.NewVolumeSnapshotClassBackupItemAction(logger)
 }
 
 // DeleteItemAction plugins
-
-func newVolumeSnapshotDeleteItemAction(f client.Factory) plugincommon.HandlerInitializer {
-	return dia.NewVolumeSnapshotDeleteItemAction(f)
-}
 
 func newVolumeSnapshotContentDeleteItemAction(f client.Factory) plugincommon.HandlerInitializer {
 	return dia.NewVolumeSnapshotContentDeleteItemAction(f)
@@ -444,11 +434,11 @@ func newVolumeSnapshotRestoreItemAction(f client.Factory) plugincommon.HandlerIn
 	return csiria.NewVolumeSnapshotRestoreItemAction(f)
 }
 
-func newVolumeSnapshotContentRestoreItemAction(logger logrus.FieldLogger) (interface{}, error) {
-	return csiria.NewVolumeSnapshotContentRestoreItemAction(logger)
+func newVolumeSnapshotContentRestoreItemAction(f client.Factory) plugincommon.HandlerInitializer {
+	return csiria.NewVolumeSnapshotContentRestoreItemAction(f)
 }
 
-func newVolumeSnapshotClassRestoreItemAction(logger logrus.FieldLogger) (interface{}, error) {
+func newVolumeSnapshotClassRestoreItemAction(logger logrus.FieldLogger) (any, error) {
 	return csiria.NewVolumeSnapshotClassRestoreItemAction(logger)
 }
 
@@ -458,19 +448,24 @@ func newPVCItemBlockAction(f client.Factory) plugincommon.HandlerInitializer {
 	return iba.NewPVCAction(f)
 }
 
-func newPodItemBlockAction(logger logrus.FieldLogger) (interface{}, error) {
+func newPodItemBlockAction(logger logrus.FieldLogger) (any, error) {
 	return iba.NewPodAction(logger), nil
 }
 
 func newServiceAccountItemBlockAction(f client.Factory) plugincommon.HandlerInitializer {
-	return func(logger logrus.FieldLogger) (interface{}, error) {
+	return func(logger logrus.FieldLogger) (any, error) {
 		// TODO(ncdc): consider a k8s style WantsKubernetesClientSet initialization approach
 		clientset, err := f.KubeClient()
 		if err != nil {
 			return nil, err
 		}
 
-		discoveryHelper, err := velerodiscovery.NewHelper(clientset.Discovery(), logger)
+		discoveryClient, err := f.DiscoveryClient()
+		if err != nil {
+			return nil, err
+		}
+
+		discoveryHelper, err := velerodiscovery.NewHelper(discoveryClient, logger)
 		if err != nil {
 			return nil, err
 		}

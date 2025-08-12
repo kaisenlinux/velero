@@ -22,25 +22,27 @@ import (
 	"sync"
 	"time"
 
-	storagev1api "k8s.io/api/storage/v1"
-
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	v1 "k8s.io/api/core/v1"
+	storagev1api "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/clock"
 
 	"github.com/vmware-tanzu/velero/internal/hook"
 	"github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	"github.com/vmware-tanzu/velero/pkg/constant"
+	"github.com/vmware-tanzu/velero/pkg/itemoperation"
 	"github.com/vmware-tanzu/velero/pkg/metrics"
 	"github.com/vmware-tanzu/velero/pkg/persistence"
 	"github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt"
+	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 	"github.com/vmware-tanzu/velero/pkg/util/results"
 )
@@ -86,6 +88,7 @@ func NewRestoreFinalizerReconciler(
 func (r *restoreFinalizerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&velerov1api.Restore{}).
+		Named(constant.ControllerRestoreFinalizer).
 		Complete(r)
 }
 
@@ -155,6 +158,12 @@ func (r *restoreFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	restoredPVCList := volume.RestoredPVCFromRestoredResourceList(restoredResourceList)
 
+	restoreItemOperations, err := backupStore.GetRestoreItemOperations(restore.Name)
+	if err != nil {
+		log.WithError(err).Error("error getting itemOperationList")
+		return ctrl.Result{}, errors.Wrap(err, "error getting itemOperationList")
+	}
+
 	finalizerCtx := &finalizerContext{
 		logger:           log,
 		restore:          restore,
@@ -163,6 +172,9 @@ func (r *restoreFinalizerReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		restoredPVCList:  restoredPVCList,
 		multiHookTracker: r.multiHookTracker,
 		resourceTimeout:  r.resourceTimeout,
+		restoreItemOperationList: restoreItemOperationList{
+			items: restoreItemOperations,
+		},
 	}
 	warnings, errs := finalizerCtx.execute()
 
@@ -239,16 +251,44 @@ func (r *restoreFinalizerReconciler) finishProcessing(restorePhase velerov1api.R
 	return kubeutil.PatchResourceWithRetriesOnErrors(r.resourceTimeout, original, restore, r.Client)
 }
 
+type restoreItemOperationList struct {
+	items []*itemoperation.RestoreOperation
+}
+
+func (r *restoreItemOperationList) selectByResource(group, resource, ns, name string) []*itemoperation.RestoreOperation {
+	var res []*itemoperation.RestoreOperation
+	rid := velero.ResourceIdentifier{
+		GroupResource: schema.GroupResource{
+			Group:    group,
+			Resource: resource,
+		},
+		Namespace: ns,
+		Name:      name,
+	}
+	for _, item := range r.items {
+		if item != nil && item.Spec.ResourceIdentifier == rid {
+			res = append(res, item)
+		}
+	}
+	return res
+}
+
+// SelectByPVC filters the restore item operation list by PVC namespace and name.
+func (r *restoreItemOperationList) SelectByPVC(ns, name string) []*itemoperation.RestoreOperation {
+	return r.selectByResource("", "persistentvolumeclaims", ns, name)
+}
+
 // finalizerContext includes all the dependencies required by finalization tasks and
 // a function execute() to orderly implement task logic.
 type finalizerContext struct {
-	logger           logrus.FieldLogger
-	restore          *velerov1api.Restore
-	crClient         client.Client
-	volumeInfo       []*volume.BackupVolumeInfo
-	restoredPVCList  map[string]struct{}
-	multiHookTracker *hook.MultiHookTracker
-	resourceTimeout  time.Duration
+	logger                   logrus.FieldLogger
+	restore                  *velerov1api.Restore
+	crClient                 client.Client
+	volumeInfo               []*volume.BackupVolumeInfo
+	restoredPVCList          map[string]struct{}
+	restoreItemOperationList restoreItemOperationList
+	multiHookTracker         *hook.MultiHookTracker
+	resourceTimeout          time.Duration
 }
 
 func (ctx *finalizerContext) execute() (results.Result, results.Result) { //nolint:unparam //temporarily ignore the lint report: result 0 is always nil (unparam)
@@ -308,6 +348,17 @@ func (ctx *finalizerContext) patchDynamicPVWithVolumeInfo() (errs results.Result
 					}
 					if err != nil {
 						return false, err
+					}
+
+					// Check whether the async operation to populate the PVC is successful.  If it's not, will skip patching the PV, instead of waiting.
+					operations := ctx.restoreItemOperationList.SelectByPVC(pvc.Namespace, pvc.Name)
+					for _, op := range operations {
+						if op.Spec.RestoreItemAction == constant.PluginCSIPVCRestoreRIA &&
+							op.Status.Phase != itemoperation.OperationPhaseCompleted {
+							log.Warnf("skipping PV patch, because the operation to restore the PVC is not completed, "+
+								"operation: %s, phase: %s", op.Spec.OperationID, op.Status.Phase)
+							return true, nil
+						}
 					}
 
 					// We are handling a common but specific scenario where a PVC is in a pending state and uses a storage class with

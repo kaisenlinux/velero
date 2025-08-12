@@ -19,6 +19,8 @@ package velero
 import (
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+
+	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 )
 
 // GetNodeSelectorFromVeleroServer get the node selector from the Velero server deployment
@@ -45,6 +47,15 @@ func GetEnvVarsFromVeleroServer(deployment *appsv1.Deployment) []v1.EnvVar {
 	return nil
 }
 
+// GetEnvFromSourcesFromVeleroServer get the environment sources from the Velero server deployment
+func GetEnvFromSourcesFromVeleroServer(deployment *appsv1.Deployment) []v1.EnvFromSource {
+	for _, container := range deployment.Spec.Template.Spec.Containers {
+		// We only have one container in the Velero server deployment
+		return container.EnvFrom
+	}
+	return nil
+}
+
 // GetVolumeMountsFromVeleroServer get the volume mounts from the Velero server deployment
 func GetVolumeMountsFromVeleroServer(deployment *appsv1.Deployment) []v1.VolumeMount {
 	for _, container := range deployment.Spec.Template.Spec.Containers {
@@ -64,6 +75,11 @@ func GetServiceAccountFromVeleroServer(deployment *appsv1.Deployment) string {
 	return deployment.Spec.Template.Spec.ServiceAccountName
 }
 
+// GetImagePullSecretsFromVeleroServer get the image pull secrets from the Velero server deployment
+func GetImagePullSecretsFromVeleroServer(deployment *appsv1.Deployment) []v1.LocalObjectReference {
+	return deployment.Spec.Template.Spec.ImagePullSecrets
+}
+
 // getVeleroServerImage get the image of the Velero server deployment
 func GetVeleroServerImage(deployment *appsv1.Deployment) string {
 	return deployment.Spec.Template.Spec.Containers[0].Image
@@ -77,4 +93,26 @@ func GetVeleroServerLables(deployment *appsv1.Deployment) map[string]string {
 // GetVeleroServerAnnotations get the annotations of the Velero server deployment
 func GetVeleroServerAnnotations(deployment *appsv1.Deployment) map[string]string {
 	return deployment.Spec.Template.Annotations
+}
+
+// GetVeleroServerLabelValue returns the value of specified label of Velero server deployment
+func GetVeleroServerLabelValue(deployment *appsv1.Deployment, key string) string {
+	if deployment.Spec.Template.Labels == nil {
+		return ""
+	}
+
+	return deployment.Spec.Template.Labels[key]
+}
+
+// GetVeleroServerAnnotationValue returns the value of specified annotation of Velero server deployment
+func GetVeleroServerAnnotationValue(deployment *appsv1.Deployment, key string) string {
+	if deployment.Spec.Template.Annotations == nil {
+		return ""
+	}
+
+	return deployment.Spec.Template.Annotations[key]
+}
+
+func BSLIsAvailable(bsl velerov1api.BackupStorageLocation) bool {
+	return bsl.Status.Phase == velerov1api.BackupStorageLocationPhaseAvailable
 }

@@ -29,6 +29,8 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/vmware-tanzu/velero/pkg/util/kube"
 )
 
 func TestGetInheritedPodInfo(t *testing.T) {
@@ -65,6 +67,22 @@ func TestGetInheritedPodInfo(t *testing.T) {
 								{
 									Name:  "env-2",
 									Value: "value-2",
+								},
+							},
+							EnvFrom: []v1.EnvFromSource{
+								{
+									ConfigMapRef: &v1.ConfigMapEnvSource{
+										LocalObjectReference: v1.LocalObjectReference{
+											Name: "test-configmap",
+										},
+									},
+								},
+								{
+									SecretRef: &v1.SecretEnvSource{
+										LocalObjectReference: v1.LocalObjectReference{
+											Name: "test-secret",
+										},
+									},
 								},
 							},
 							VolumeMounts: []v1.VolumeMount{
@@ -116,6 +134,22 @@ func TestGetInheritedPodInfo(t *testing.T) {
 									Value: "value-2",
 								},
 							},
+							EnvFrom: []v1.EnvFromSource{
+								{
+									ConfigMapRef: &v1.ConfigMapEnvSource{
+										LocalObjectReference: v1.LocalObjectReference{
+											Name: "test-configmap",
+										},
+									},
+								},
+								{
+									SecretRef: &v1.SecretEnvSource{
+										LocalObjectReference: v1.LocalObjectReference{
+											Name: "test-secret",
+										},
+									},
+								},
+							},
 							VolumeMounts: []v1.VolumeMount{
 								{
 									Name: "volume-1",
@@ -143,6 +177,11 @@ func TestGetInheritedPodInfo(t *testing.T) {
 						},
 					},
 					ServiceAccountName: "sa-1",
+					ImagePullSecrets: []v1.LocalObjectReference{
+						{
+							Name: "imagePullSecret1",
+						},
+					},
 				},
 			},
 		},
@@ -191,6 +230,22 @@ func TestGetInheritedPodInfo(t *testing.T) {
 						Value: "value-2",
 					},
 				},
+				envFrom: []v1.EnvFromSource{
+					{
+						ConfigMapRef: &v1.ConfigMapEnvSource{
+							LocalObjectReference: v1.LocalObjectReference{
+								Name: "test-configmap",
+							},
+						},
+					},
+					{
+						SecretRef: &v1.SecretEnvSource{
+							LocalObjectReference: v1.LocalObjectReference{
+								Name: "test-secret",
+							},
+						},
+					},
+				},
 				volumeMounts: []v1.VolumeMount{
 					{
 						Name: "volume-1",
@@ -228,6 +283,22 @@ func TestGetInheritedPodInfo(t *testing.T) {
 						Value: "value-2",
 					},
 				},
+				envFrom: []v1.EnvFromSource{
+					{
+						ConfigMapRef: &v1.ConfigMapEnvSource{
+							LocalObjectReference: v1.LocalObjectReference{
+								Name: "test-configmap",
+							},
+						},
+					},
+					{
+						SecretRef: &v1.SecretEnvSource{
+							LocalObjectReference: v1.LocalObjectReference{
+								Name: "test-secret",
+							},
+						},
+					},
+				},
 				volumeMounts: []v1.VolumeMount{
 					{
 						Name: "volume-1",
@@ -251,6 +322,11 @@ func TestGetInheritedPodInfo(t *testing.T) {
 					"--log-level",
 					"debug",
 				},
+				imagePullSecrets: []v1.LocalObjectReference{
+					{
+						Name: "imagePullSecret1",
+					},
+				},
 			},
 		},
 	}
@@ -258,7 +334,7 @@ func TestGetInheritedPodInfo(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fakeKubeClient := fake.NewSimpleClientset(test.kubeClientObj...)
-			info, err := getInheritedPodInfo(context.Background(), fakeKubeClient, test.namespace)
+			info, err := getInheritedPodInfo(context.Background(), fakeKubeClient, test.namespace, kube.NodeOSLinux)
 
 			if test.expectErr == "" {
 				assert.NoError(t, err)

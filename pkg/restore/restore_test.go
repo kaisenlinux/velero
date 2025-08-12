@@ -25,6 +25,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
+	"github.com/vmware-tanzu/velero/pkg/util/collections"
+
 	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -58,6 +61,7 @@ import (
 	uploadermocks "github.com/vmware-tanzu/velero/pkg/podvolume/mocks"
 	"github.com/vmware-tanzu/velero/pkg/test"
 	"github.com/vmware-tanzu/velero/pkg/types"
+	"github.com/vmware-tanzu/velero/pkg/util/kube"
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 	. "github.com/vmware-tanzu/velero/pkg/util/results"
 )
@@ -1708,7 +1712,7 @@ func (a *pluggableAction) AreAdditionalItemsReady(additionalItems []velero.Resou
 }
 
 // TestRestoreActionModifications runs restores with restore item actions that modify resources, and
-// verifies that that the modified item is correctly created in the API. Verification is done by looking
+// verifies that the modified item is correctly created in the API. Verification is done by looking
 // at the full object in the API.
 func TestRestoreActionModifications(t *testing.T) {
 	// modifyingActionGetter is a helper function that returns a *pluggableAction, whose Execute(...)
@@ -2005,7 +2009,7 @@ func TestRestoreWithAsyncOperations(t *testing.T) {
 }
 
 // TestRestoreActionAdditionalItems runs restores with restore item actions that return additional items
-// to be restored, and verifies that that the correct set of items is created in the API. Verification is
+// to be restored, and verifies that the correct set of items is created in the API. Verification is
 // done by looking at the namespaces/names of the items in the API; contents are not checked.
 func TestRestoreActionAdditionalItems(t *testing.T) {
 	tests := []struct {
@@ -2292,10 +2296,11 @@ func TestShouldRestore(t *testing.T) {
 			h := newHarness(t)
 
 			ctx := &restoreContext{
-				log:                        h.log,
-				dynamicFactory:             client.NewDynamicFactory(h.DynamicClient),
-				namespaceClient:            h.KubeClient.CoreV1().Namespaces(),
-				resourceTerminatingTimeout: time.Millisecond,
+				log:                           h.log,
+				dynamicFactory:                client.NewDynamicFactory(h.DynamicClient),
+				namespaceClient:               h.KubeClient.CoreV1().Namespaces(),
+				resourceTerminatingTimeout:    time.Millisecond,
+				resourceDeletionStatusTracker: kube.NewResourceDeletionStatusTracker(),
 			}
 
 			for _, resource := range tc.apiResources {
@@ -2352,7 +2357,7 @@ func assertRestoredItems(t *testing.T, h *harness, want []*test.APIResource) {
 
 			t.Logf("%v", string(itemJSON))
 
-			u := make(map[string]interface{})
+			u := make(map[string]any)
 			if !assert.NoError(t, json.Unmarshal(itemJSON, &u)) {
 				continue
 			}
@@ -3711,9 +3716,10 @@ func newHarness(t *testing.T) *harness {
 			fileSystem:                 test.NewFakeFileSystem(),
 
 			// unsupported
-			podVolumeRestorerFactory: nil,
-			podVolumeTimeout:         0,
-			kbClient:                 kbClient,
+			podVolumeRestorerFactory:      nil,
+			podVolumeTimeout:              0,
+			kbClient:                      kbClient,
+			resourceDeletionStatusTracker: kube.NewResourceDeletionStatusTracker(),
 		},
 		log: log,
 	}
@@ -3758,7 +3764,7 @@ func Test_resetVolumeBindingInfo(t *testing.T) {
 				kubeutil.KubeAnnBindCompleted,
 				kubeutil.KubeAnnBoundByController,
 				kubeutil.KubeAnnDynamicallyProvisioned,
-			).WithSpecField("claimRef", map[string]interface{}{
+			).WithSpecField("claimRef", map[string]any{
 				"namespace":       "ns-1",
 				"name":            "pvc-1",
 				"uid":             "abc",
@@ -3766,7 +3772,7 @@ func Test_resetVolumeBindingInfo(t *testing.T) {
 			expected: newTestUnstructured().WithMetadataField("kind", "persistentVolume").
 				WithName("pv-1").
 				WithAnnotations(kubeutil.KubeAnnDynamicallyProvisioned).
-				WithSpecField("claimRef", map[string]interface{}{
+				WithSpecField("claimRef", map[string]any{
 					"namespace": "ns-1", "name": "pvc-1"}).Unstructured,
 		},
 		{
@@ -3806,7 +3812,7 @@ func TestIsAlreadyExistsError(t *testing.T) {
 		{
 			name: "The input obj isn't service",
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"kind": "Pod",
 				},
 			},
@@ -3815,7 +3821,7 @@ func TestIsAlreadyExistsError(t *testing.T) {
 		{
 			name: "The StatusError contains no causes",
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"kind": "Service",
 				},
 			},
@@ -3829,7 +3835,7 @@ func TestIsAlreadyExistsError(t *testing.T) {
 		{
 			name: "The causes contains not only port already allocated error",
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"kind": "Service",
 				},
 			},
@@ -3849,9 +3855,9 @@ func TestIsAlreadyExistsError(t *testing.T) {
 		{
 			name: "Get already allocated error but the service doesn't exist",
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"kind": "Service",
-					"metadata": map[string]interface{}{
+					"metadata": map[string]any{
 						"namespace": "default",
 						"name":      "test",
 					},
@@ -3875,9 +3881,9 @@ func TestIsAlreadyExistsError(t *testing.T) {
 				builder.ForService("default", "test").Result(),
 			),
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"kind": "Service",
-					"metadata": map[string]interface{}{
+					"metadata": map[string]any{
 						"namespace": "default",
 						"name":      "test",
 					},
@@ -3900,9 +3906,10 @@ func TestIsAlreadyExistsError(t *testing.T) {
 		h := newHarness(t)
 
 		ctx := &restoreContext{
-			log:             h.log,
-			dynamicFactory:  client.NewDynamicFactory(h.DynamicClient),
-			namespaceClient: h.KubeClient.CoreV1().Namespaces(),
+			log:                           h.log,
+			dynamicFactory:                client.NewDynamicFactory(h.DynamicClient),
+			namespaceClient:               h.KubeClient.CoreV1().Namespaces(),
+			resourceDeletionStatusTracker: kube.NewResourceDeletionStatusTracker(),
 		}
 
 		if test.apiResource != nil {
@@ -3935,7 +3942,7 @@ func TestHasCSIVolumeSnapshot(t *testing.T) {
 		{
 			name: "Invalid PV, expect false.",
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"kind": 1,
 				},
 			},
@@ -3944,10 +3951,10 @@ func TestHasCSIVolumeSnapshot(t *testing.T) {
 		{
 			name: "Cannot find VS, expect false",
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"kind":       "PersistentVolume",
 					"apiVersion": "v1",
-					"metadata": map[string]interface{}{
+					"metadata": map[string]any{
 						"namespace": "default",
 						"name":      "test",
 					},
@@ -3958,15 +3965,15 @@ func TestHasCSIVolumeSnapshot(t *testing.T) {
 		{
 			name: "VS's source PVC is nil, expect false",
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"kind":       "PersistentVolume",
 					"apiVersion": "v1",
-					"metadata": map[string]interface{}{
+					"metadata": map[string]any{
 						"namespace": "default",
 						"name":      "test",
 					},
-					"spec": map[string]interface{}{
-						"claimRef": map[string]interface{}{
+					"spec": map[string]any{
+						"claimRef": map[string]any{
 							"namespace": "velero",
 							"name":      "test",
 						},
@@ -3979,10 +3986,10 @@ func TestHasCSIVolumeSnapshot(t *testing.T) {
 		{
 			name: "PVs claimref is nil, expect false.",
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"kind":       "PersistentVolume",
 					"apiVersion": "v1",
-					"metadata": map[string]interface{}{
+					"metadata": map[string]any{
 						"namespace": "velero",
 						"name":      "test",
 					},
@@ -3995,15 +4002,15 @@ func TestHasCSIVolumeSnapshot(t *testing.T) {
 		{
 			name: "Find VS, expect true.",
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"kind":       "PersistentVolume",
 					"apiVersion": "v1",
-					"metadata": map[string]interface{}{
+					"metadata": map[string]any{
 						"namespace": "velero",
 						"name":      "test",
 					},
-					"spec": map[string]interface{}{
-						"claimRef": map[string]interface{}{
+					"spec": map[string]any{
+						"claimRef": map[string]any{
 							"namespace": "velero",
 							"name":      "test",
 						},
@@ -4019,7 +4026,8 @@ func TestHasCSIVolumeSnapshot(t *testing.T) {
 		h := newHarness(t)
 
 		ctx := &restoreContext{
-			log: h.log,
+			log:                           h.log,
+			resourceDeletionStatusTracker: kube.NewResourceDeletionStatusTracker(),
 		}
 
 		if tc.vs != nil {
@@ -4043,7 +4051,7 @@ func TestHasSnapshotDataUpload(t *testing.T) {
 		{
 			name: "Invalid PV, expect false.",
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"kind": 1,
 				},
 			},
@@ -4052,10 +4060,10 @@ func TestHasSnapshotDataUpload(t *testing.T) {
 		{
 			name: "PV without ClaimRef, expect false",
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"kind":       "PersistentVolume",
 					"apiVersion": "v1",
-					"metadata": map[string]interface{}{
+					"metadata": map[string]any{
 						"namespace": "default",
 						"name":      "test",
 					},
@@ -4068,15 +4076,15 @@ func TestHasSnapshotDataUpload(t *testing.T) {
 		{
 			name: "Cannot find DataUploadResult CM, expect false",
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"kind":       "PersistentVolume",
 					"apiVersion": "v1",
-					"metadata": map[string]interface{}{
+					"metadata": map[string]any{
 						"namespace": "default",
 						"name":      "test",
 					},
-					"spec": map[string]interface{}{
-						"claimRef": map[string]interface{}{
+					"spec": map[string]any{
+						"claimRef": map[string]any{
 							"namespace": "velero",
 							"name":      "testPVC",
 						},
@@ -4090,15 +4098,15 @@ func TestHasSnapshotDataUpload(t *testing.T) {
 		{
 			name: "Find DataUploadResult CM, expect true",
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"kind":       "PersistentVolume",
 					"apiVersion": "v1",
-					"metadata": map[string]interface{}{
+					"metadata": map[string]any{
 						"namespace": "default",
 						"name":      "test",
 					},
-					"spec": map[string]interface{}{
-						"claimRef": map[string]interface{}{
+					"spec": map[string]any{
+						"claimRef": map[string]any{
 							"namespace": "velero",
 							"name":      "testPVC",
 						},
@@ -4119,9 +4127,10 @@ func TestHasSnapshotDataUpload(t *testing.T) {
 		h := newHarness(t)
 
 		ctx := &restoreContext{
-			log:      h.log,
-			kbClient: h.restorer.kbClient,
-			restore:  tc.restore,
+			log:                           h.log,
+			kbClient:                      h.restorer.kbClient,
+			restore:                       tc.restore,
+			resourceDeletionStatusTracker: kube.NewResourceDeletionStatusTracker(),
 		}
 
 		if tc.duResult != nil {
@@ -4130,6 +4139,104 @@ func TestHasSnapshotDataUpload(t *testing.T) {
 
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.expectedResult, hasSnapshotDataUpload(ctx, tc.obj))
+		})
+	}
+}
+
+func TestDetermineRestoreStatus(t *testing.T) {
+	tests := []struct {
+		name                string
+		annotations         map[string]string
+		restoreSpecIncludes *bool
+		expectedDecision    bool
+	}{
+		{
+			name:                "No annotation, fallback to restore spec",
+			annotations:         nil,
+			restoreSpecIncludes: boolptr.True(),
+			expectedDecision:    true,
+		},
+		{
+			name:                "No annotation, restore spec excludes",
+			annotations:         nil,
+			restoreSpecIncludes: boolptr.False(),
+			expectedDecision:    false,
+		},
+		{
+			name:                "Annotation explicitly set to true, restore spec is false",
+			annotations:         map[string]string{ObjectStatusRestoreAnnotationKey: "true"},
+			restoreSpecIncludes: boolptr.False(),
+			expectedDecision:    true,
+		},
+		{
+			name:                "Annotation explicitly set to false, restore spec is true",
+			annotations:         map[string]string{ObjectStatusRestoreAnnotationKey: "false"},
+			restoreSpecIncludes: boolptr.True(),
+			expectedDecision:    false,
+		},
+		{
+			name:                "Invalid annotation value, fallback to restore spec",
+			annotations:         map[string]string{ObjectStatusRestoreAnnotationKey: "foo"},
+			restoreSpecIncludes: boolptr.True(),
+			expectedDecision:    true,
+		},
+		{
+			name:                "Empty annotation value, fallback to restore spec",
+			annotations:         map[string]string{ObjectStatusRestoreAnnotationKey: ""},
+			restoreSpecIncludes: boolptr.False(),
+			expectedDecision:    false,
+		},
+		{
+			name:                "Mixed-case annotation value 'True' should be treated as true",
+			annotations:         map[string]string{ObjectStatusRestoreAnnotationKey: "True"},
+			restoreSpecIncludes: boolptr.True(),
+			expectedDecision:    true,
+		},
+		{
+			name:                "Mixed-case annotation value 'FALSE' should be treated as false",
+			annotations:         map[string]string{ObjectStatusRestoreAnnotationKey: "FALSE"},
+			restoreSpecIncludes: boolptr.True(),
+			expectedDecision:    false,
+		},
+		{
+			name:                "Nil IncludesExcludes, but annotation is 'true'",
+			annotations:         map[string]string{ObjectStatusRestoreAnnotationKey: "true"},
+			restoreSpecIncludes: nil,
+			expectedDecision:    true,
+		},
+		{
+			name:                "Nil IncludesExcludes, but annotation is 'false'",
+			annotations:         map[string]string{ObjectStatusRestoreAnnotationKey: "false"},
+			restoreSpecIncludes: nil,
+			expectedDecision:    false,
+		},
+		{
+			name:                "Nil IncludesExcludes, no annotation (default to false)",
+			annotations:         nil,
+			restoreSpecIncludes: nil,
+			expectedDecision:    false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			obj := &unstructured.Unstructured{}
+			obj.SetAnnotations(test.annotations)
+
+			var includesExcludes *collections.IncludesExcludes
+			if test.restoreSpecIncludes != nil {
+				includesExcludes = collections.NewIncludesExcludes()
+				if *test.restoreSpecIncludes {
+					includesExcludes.Includes("*")
+				} else {
+					includesExcludes.Excludes("*")
+				}
+			}
+
+			log := logrus.New()
+			result := determineRestoreStatus(obj, includesExcludes, "testGroupResource", log)
+
+			assert.Equal(t, test.expectedDecision, result)
 		})
 	}
 }

@@ -57,8 +57,6 @@ import (
 
 const (
 	dataUploadDownloadRequestor = "snapshot-data-upload-download"
-	acceptNodeAnnoKey           = "velero.io/accepted-by"
-	acceptTimeAnnoKey           = "velero.io/accepted-at"
 	DataUploadDownloadFinalizer = "velero.io/data-upload-download-finalizer"
 	preparingMonitorFrequency   = time.Minute
 )
@@ -258,11 +256,9 @@ func (r *DataUploadReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		} else if peekErr := ep.PeekExposed(ctx, getOwnerObject(du)); peekErr != nil {
 			r.tryCancelAcceptedDataUpload(ctx, du, fmt.Sprintf("found a dataupload %s/%s with expose error: %s. mark it as cancel", du.Namespace, du.Name, peekErr))
 			log.Errorf("Cancel du %s/%s because of expose error %s", du.Namespace, du.Name, peekErr)
-		} else if at, found := du.Annotations[acceptTimeAnnoKey]; found {
-			if t, err := time.Parse(time.RFC3339, at); err == nil {
-				if time.Since(t) >= r.preparingTimeout {
-					r.onPrepareTimeout(ctx, du)
-				}
+		} else if du.Status.AcceptedTimestamp != nil {
+			if time.Since(du.Status.AcceptedTimestamp.Time) >= r.preparingTimeout {
+				r.onPrepareTimeout(ctx, du)
 			}
 		}
 
@@ -287,6 +283,10 @@ func (r *DataUploadReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		} else if res == nil {
 			log.Debug("Get empty exposer")
 			return ctrl.Result{}, nil
+		}
+
+		if res.ByPod.NodeOS == nil {
+			return r.errorOut(ctx, du, errors.New("unsupported ambiguous node OS"), "invalid expose result", log)
 		}
 
 		log.Info("Exposed snapshot is ready and creating data path routine")
@@ -321,6 +321,7 @@ func (r *DataUploadReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		original := du.DeepCopy()
 		du.Status.Phase = velerov2alpha1api.DataUploadPhaseInProgress
 		du.Status.StartTimestamp = &metav1.Time{Time: r.Clock.Now()}
+		du.Status.NodeOS = velerov2alpha1api.NodeOS(*res.ByPod.NodeOS)
 		if err := r.client.Patch(ctx, du, client.MergeFrom(original)); err != nil {
 			log.WithError(err).Warnf("Failed to update dataupload %s to InProgress, will data path close and retry", du.Name)
 
@@ -557,15 +558,17 @@ func (r *DataUploadReconciler) OnDataUploadProgress(ctx context.Context, namespa
 // re-enqueue the previous related request once the related pod is in running status to keep going on the rest logic. and below logic will avoid handling the unwanted
 // pod status and also avoid block others CR handling
 func (r *DataUploadReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	s := kube.NewPeriodicalEnqueueSource(r.logger.WithField("controller", constant.ControllerDataUpload), r.client, &velerov2alpha1api.DataUploadList{}, preparingMonitorFrequency, kube.PeriodicalEnqueueSourceOption{})
 	gp := kube.NewGenericEventPredicate(func(object client.Object) bool {
 		du := object.(*velerov2alpha1api.DataUpload)
 		return (du.Status.Phase == velerov2alpha1api.DataUploadPhaseAccepted)
 	})
+	s := kube.NewPeriodicalEnqueueSource(r.logger.WithField("controller", constant.ControllerDataUpload), r.client, &velerov2alpha1api.DataUploadList{}, preparingMonitorFrequency, kube.PeriodicalEnqueueSourceOption{
+		Predicates: []predicate.Predicate{gp},
+	})
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&velerov2alpha1api.DataUpload{}).
-		WatchesRawSource(s, nil, builder.WithPredicates(gp)).
+		WatchesRawSource(s).
 		Watches(&corev1.Pod{}, kube.EnqueueRequestsFromMapUpdateFunc(r.findDataUploadForPod),
 			builder.WithPredicates(predicate.Funcs{
 				UpdateFunc: func(ue event.UpdateEvent) bool {
@@ -704,13 +707,8 @@ func (r *DataUploadReconciler) acceptDataUpload(ctx context.Context, du *velerov
 
 	updateFunc := func(dataUpload *velerov2alpha1api.DataUpload) {
 		dataUpload.Status.Phase = velerov2alpha1api.DataUploadPhaseAccepted
-		annotations := dataUpload.GetAnnotations()
-		if annotations == nil {
-			annotations = make(map[string]string)
-		}
-		annotations[acceptNodeAnnoKey] = r.nodeName
-		annotations[acceptTimeAnnoKey] = r.Clock.Now().Format(time.RFC3339)
-		dataUpload.SetAnnotations(annotations)
+		dataUpload.Status.AcceptedByNode = r.nodeName
+		dataUpload.Status.AcceptedTimestamp = &metav1.Time{Time: r.Clock.Now()}
 	}
 
 	succeeded, err := r.exclusiveUpdateDataUpload(ctx, updated, updateFunc)
@@ -798,7 +796,9 @@ func (r *DataUploadReconciler) closeDataPath(ctx context.Context, duName string)
 	r.dataPathMgr.RemoveAsyncBR(duName)
 }
 
-func (r *DataUploadReconciler) setupExposeParam(du *velerov2alpha1api.DataUpload) (interface{}, error) {
+func (r *DataUploadReconciler) setupExposeParam(du *velerov2alpha1api.DataUpload) (any, error) {
+	log := r.logger.WithField("dataupload", du.Name)
+
 	if du.Spec.SnapshotType == velerov2alpha1api.SnapshotTypeCSI {
 		pvc := &corev1.PersistentVolumeClaim{}
 		err := r.client.Get(context.Background(), types.NamespacedName{
@@ -810,6 +810,12 @@ func (r *DataUploadReconciler) setupExposeParam(du *velerov2alpha1api.DataUpload
 			return nil, errors.Wrapf(err, "failed to get PVC %s/%s", du.Spec.SourceNamespace, du.Spec.SourcePVC)
 		}
 
+		nodeOS := kube.GetPVCAttachingNodeOS(pvc, r.kubeClient.CoreV1(), r.kubeClient.StorageV1(), log)
+
+		if err := kube.HasNodeWithOS(context.Background(), nodeOS, r.kubeClient.CoreV1()); err != nil {
+			return nil, errors.Wrapf(err, "no appropriate node to run data upload for PVC %s/%s", du.Spec.SourceNamespace, du.Spec.SourcePVC)
+		}
+
 		accessMode := exposer.AccessModeFileSystem
 		if pvc.Spec.VolumeMode != nil && *pvc.Spec.VolumeMode == corev1.PersistentVolumeBlock {
 			accessMode = exposer.AccessModeBlock
@@ -817,33 +823,47 @@ func (r *DataUploadReconciler) setupExposeParam(du *velerov2alpha1api.DataUpload
 
 		hostingPodLabels := map[string]string{velerov1api.DataUploadLabel: du.Name}
 		for _, k := range util.ThirdPartyLabels {
-			if v, err := nodeagent.GetLabelValue(context.Background(), r.kubeClient, du.Namespace, k); err != nil {
+			if v, err := nodeagent.GetLabelValue(context.Background(), r.kubeClient, du.Namespace, k, nodeOS); err != nil {
 				if err != nodeagent.ErrNodeAgentLabelNotFound {
-					r.logger.WithError(err).Warnf("Failed to check node-agent label, skip adding host pod label %s", k)
+					log.WithError(err).Warnf("Failed to check node-agent label, skip adding host pod label %s", k)
 				}
 			} else {
 				hostingPodLabels[k] = v
 			}
 		}
 
+		hostingPodAnnotation := map[string]string{}
+		for _, k := range util.ThirdPartyAnnotations {
+			if v, err := nodeagent.GetAnnotationValue(context.Background(), r.kubeClient, du.Namespace, k, nodeOS); err != nil {
+				if err != nodeagent.ErrNodeAgentAnnotationNotFound {
+					log.WithError(err).Warnf("Failed to check node-agent annotation, skip adding host pod annotation %s", k)
+				}
+			} else {
+				hostingPodAnnotation[k] = v
+			}
+		}
+
 		return &exposer.CSISnapshotExposeParam{
-			SnapshotName:     du.Spec.CSISnapshot.VolumeSnapshot,
-			SourceNamespace:  du.Spec.SourceNamespace,
-			StorageClass:     du.Spec.CSISnapshot.StorageClass,
-			HostingPodLabels: hostingPodLabels,
-			AccessMode:       accessMode,
-			OperationTimeout: du.Spec.OperationTimeout.Duration,
-			ExposeTimeout:    r.preparingTimeout,
-			VolumeSize:       pvc.Spec.Resources.Requests[corev1.ResourceStorage],
-			Affinity:         r.loadAffinity,
-			BackupPVCConfig:  r.backupPVCConfig,
-			Resources:        r.podResources,
+			SnapshotName:          du.Spec.CSISnapshot.VolumeSnapshot,
+			SourceNamespace:       du.Spec.SourceNamespace,
+			StorageClass:          du.Spec.CSISnapshot.StorageClass,
+			HostingPodLabels:      hostingPodLabels,
+			HostingPodAnnotations: hostingPodAnnotation,
+			AccessMode:            accessMode,
+			OperationTimeout:      du.Spec.OperationTimeout.Duration,
+			ExposeTimeout:         r.preparingTimeout,
+			VolumeSize:            pvc.Spec.Resources.Requests[corev1.ResourceStorage],
+			Affinity:              r.loadAffinity,
+			BackupPVCConfig:       r.backupPVCConfig,
+			Resources:             r.podResources,
+			NodeOS:                nodeOS,
 		}, nil
 	}
+
 	return nil, nil
 }
 
-func (r *DataUploadReconciler) setupWaitExposePara(du *velerov2alpha1api.DataUpload) interface{} {
+func (r *DataUploadReconciler) setupWaitExposePara(du *velerov2alpha1api.DataUpload) any {
 	if du.Spec.SnapshotType == velerov2alpha1api.SnapshotTypeCSI {
 		return &exposer.CSISnapshotExposeWaitParam{
 			NodeClient: r.client,

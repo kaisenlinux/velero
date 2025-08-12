@@ -33,13 +33,20 @@ import (
 )
 
 const (
-	// daemonSet is the name of the Velero node agent daemonset.
+	// daemonSet is the name of the Velero node agent daemonset on linux nodes.
 	daemonSet = "node-agent"
+
+	// daemonsetWindows is the name of the Velero node agent daemonset on Windows nodes.
+	daemonsetWindows = "node-agent-windows"
+
+	// nodeAgentRole marks pods with node-agent role on all nodes.
+	nodeAgentRole = "node-agent"
 )
 
 var (
-	ErrDaemonSetNotFound      = errors.New("daemonset not found")
-	ErrNodeAgentLabelNotFound = errors.New("node-agent label not found")
+	ErrDaemonSetNotFound           = errors.New("daemonset not found")
+	ErrNodeAgentLabelNotFound      = errors.New("node-agent label not found")
+	ErrNodeAgentAnnotationNotFound = errors.New("node-agent annotation not found")
 )
 
 type LoadConcurrency struct {
@@ -75,6 +82,11 @@ type BackupPVC struct {
 	SPCNoRelabeling bool `json:"spcNoRelabeling,omitempty"`
 }
 
+type RestorePVC struct {
+	// IgnoreDelayBinding indicates to ignore delay binding the restorePVC when it is in WaitForFirstConsumer mode
+	IgnoreDelayBinding bool `json:"ignoreDelayBinding,omitempty"`
+}
+
 type Configs struct {
 	// LoadConcurrency is the config for data path load concurrency per node.
 	LoadConcurrency *LoadConcurrency `json:"loadConcurrency,omitempty"`
@@ -85,13 +97,23 @@ type Configs struct {
 	// BackupPVCConfig is the config for backupPVC (intermediate PVC) of snapshot data movement
 	BackupPVCConfig map[string]BackupPVC `json:"backupPVC,omitempty"`
 
+	// RestoreVCConfig is the config for restorePVC (intermediate PVC) of generic restore
+	RestorePVCConfig *RestorePVC `json:"restorePVC,omitempty"`
+
 	// PodResources is the resource config for various types of pods launched by node-agent, i.e., data mover pods.
 	PodResources *kube.PodResources `json:"podResources,omitempty"`
 }
 
-// IsRunning checks if the node agent daemonset is running properly. If not, return the error found
-func IsRunning(ctx context.Context, kubeClient kubernetes.Interface, namespace string) error {
-	if _, err := kubeClient.AppsV1().DaemonSets(namespace).Get(ctx, daemonSet, metav1.GetOptions{}); apierrors.IsNotFound(err) {
+func IsRunningOnLinux(ctx context.Context, kubeClient kubernetes.Interface, namespace string) error {
+	return isRunning(ctx, kubeClient, namespace, daemonSet)
+}
+
+func IsRunningOnWindows(ctx context.Context, kubeClient kubernetes.Interface, namespace string) error {
+	return isRunning(ctx, kubeClient, namespace, daemonsetWindows)
+}
+
+func isRunning(ctx context.Context, kubeClient kubernetes.Interface, namespace string, daemonset string) error {
+	if _, err := kubeClient.AppsV1().DaemonSets(namespace).Get(ctx, daemonset, metav1.GetOptions{}); apierrors.IsNotFound(err) {
 		return ErrDaemonSetNotFound
 	} else if err != nil {
 		return err
@@ -116,7 +138,7 @@ func isRunningInNode(ctx context.Context, namespace string, nodeName string, crC
 	}
 
 	pods := new(v1.PodList)
-	parsedSelector, err := labels.Parse(fmt.Sprintf("name=%s", daemonSet))
+	parsedSelector, err := labels.Parse(fmt.Sprintf("role=%s", nodeAgentRole))
 	if err != nil {
 		return errors.Wrap(err, "fail to parse selector")
 	}
@@ -128,7 +150,7 @@ func isRunningInNode(ctx context.Context, namespace string, nodeName string, crC
 	}
 
 	if err != nil {
-		return errors.Wrap(err, "failed to list daemonset pods")
+		return errors.Wrap(err, "failed to list node-agent pods")
 	}
 
 	for i := range pods.Items {
@@ -144,10 +166,15 @@ func isRunningInNode(ctx context.Context, namespace string, nodeName string, crC
 	return errors.Errorf("daemonset pod not found in running state in node %s", nodeName)
 }
 
-func GetPodSpec(ctx context.Context, kubeClient kubernetes.Interface, namespace string) (*v1.PodSpec, error) {
-	ds, err := kubeClient.AppsV1().DaemonSets(namespace).Get(ctx, daemonSet, metav1.GetOptions{})
+func GetPodSpec(ctx context.Context, kubeClient kubernetes.Interface, namespace string, osType string) (*v1.PodSpec, error) {
+	dsName := daemonSet
+	if osType == kube.NodeOSWindows {
+		dsName = daemonsetWindows
+	}
+
+	ds, err := kubeClient.AppsV1().DaemonSets(namespace).Get(ctx, dsName, metav1.GetOptions{})
 	if err != nil {
-		return nil, errors.Wrap(err, "error to get node-agent daemonset")
+		return nil, errors.Wrapf(err, "error to get %s daemonset", dsName)
 	}
 
 	return &ds.Spec.Template.Spec, nil
@@ -177,10 +204,15 @@ func GetConfigs(ctx context.Context, namespace string, kubeClient kubernetes.Int
 	return configs, nil
 }
 
-func GetLabelValue(ctx context.Context, kubeClient kubernetes.Interface, namespace string, key string) (string, error) {
-	ds, err := kubeClient.AppsV1().DaemonSets(namespace).Get(ctx, daemonSet, metav1.GetOptions{})
+func GetLabelValue(ctx context.Context, kubeClient kubernetes.Interface, namespace string, key string, osType string) (string, error) {
+	dsName := daemonSet
+	if osType == kube.NodeOSWindows {
+		dsName = daemonsetWindows
+	}
+
+	ds, err := kubeClient.AppsV1().DaemonSets(namespace).Get(ctx, dsName, metav1.GetOptions{})
 	if err != nil {
-		return "", errors.Wrap(err, "error getting node-agent daemonset")
+		return "", errors.Wrapf(err, "error getting %s daemonset", dsName)
 	}
 
 	if ds.Spec.Template.Labels == nil {
@@ -190,6 +222,29 @@ func GetLabelValue(ctx context.Context, kubeClient kubernetes.Interface, namespa
 	val, found := ds.Spec.Template.Labels[key]
 	if !found {
 		return "", ErrNodeAgentLabelNotFound
+	}
+
+	return val, nil
+}
+
+func GetAnnotationValue(ctx context.Context, kubeClient kubernetes.Interface, namespace string, key string, osType string) (string, error) {
+	dsName := daemonSet
+	if osType == kube.NodeOSWindows {
+		dsName = daemonsetWindows
+	}
+
+	ds, err := kubeClient.AppsV1().DaemonSets(namespace).Get(ctx, dsName, metav1.GetOptions{})
+	if err != nil {
+		return "", errors.Wrapf(err, "error getting %s daemonset", dsName)
+	}
+
+	if ds.Spec.Template.Annotations == nil {
+		return "", ErrNodeAgentAnnotationNotFound
+	}
+
+	val, found := ds.Spec.Template.Annotations[key]
+	if !found {
+		return "", ErrNodeAgentAnnotationNotFound
 	}
 
 	return val, nil

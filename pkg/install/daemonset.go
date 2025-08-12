@@ -23,6 +23,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	"github.com/vmware-tanzu/velero/internal/velero"
 )
@@ -57,8 +58,13 @@ func DaemonSet(namespace string, opts ...podTemplateOption) *appsv1.DaemonSet {
 	userID := int64(0)
 	mountPropagationMode := corev1.MountPropagationHostToContainer
 
+	dsName := "node-agent"
+	if c.forWindows {
+		dsName = "node-agent-windows"
+	}
+
 	daemonSet := &appsv1.DaemonSet{
-		ObjectMeta: objectMeta(namespace, "node-agent"),
+		ObjectMeta: objectMeta(namespace, dsName),
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "DaemonSet",
 			APIVersion: appsv1.SchemeGroupVersion.String(),
@@ -66,13 +72,14 @@ func DaemonSet(namespace string, opts ...podTemplateOption) *appsv1.DaemonSet {
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
-					"name": "node-agent",
+					"name": dsName,
 				},
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: podLabels(c.labels, map[string]string{
-						"name": "node-agent",
+						"name": dsName,
+						"role": "node-agent",
 					}),
 					Annotations: c.annotations,
 				},
@@ -107,7 +114,7 @@ func DaemonSet(namespace string, opts ...podTemplateOption) *appsv1.DaemonSet {
 					},
 					Containers: []corev1.Container{
 						{
-							Name:            "node-agent",
+							Name:            dsName,
 							Image:           c.image,
 							Ports:           containerPorts(),
 							ImagePullPolicy: pullPolicy,
@@ -171,7 +178,9 @@ func DaemonSet(namespace string, opts ...podTemplateOption) *appsv1.DaemonSet {
 				Name: "cloud-credentials",
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
-						SecretName: "cloud-credentials",
+						// read-only for Owner, Group, Public
+						DefaultMode: ptr.To(int32(0444)),
+						SecretName:  "cloud-credentials",
 					},
 				},
 			},
@@ -203,6 +212,32 @@ func DaemonSet(namespace string, opts ...podTemplateOption) *appsv1.DaemonSet {
 				Value: "/credentials/cloud",
 			},
 		}...)
+	}
+
+	if c.forWindows {
+		daemonSet.Spec.Template.Spec.SecurityContext = nil
+		daemonSet.Spec.Template.Spec.Containers[0].SecurityContext = nil
+		daemonSet.Spec.Template.Spec.NodeSelector = map[string]string{
+			"kubernetes.io/os": "windows",
+		}
+		daemonSet.Spec.Template.Spec.OS = &corev1.PodOS{
+			Name: "windows",
+		}
+		daemonSet.Spec.Template.Spec.Tolerations = []corev1.Toleration{
+			{
+				Key:      "os",
+				Operator: "Equal",
+				Effect:   "NoSchedule",
+				Value:    "windows",
+			},
+		}
+	} else {
+		daemonSet.Spec.Template.Spec.NodeSelector = map[string]string{
+			"kubernetes.io/os": "linux",
+		}
+		daemonSet.Spec.Template.Spec.OS = &corev1.PodOS{
+			Name: "linux",
+		}
 	}
 
 	daemonSet.Spec.Template.Spec.Containers[0].Env = append(daemonSet.Spec.Template.Spec.Containers[0].Env, c.envVars...)

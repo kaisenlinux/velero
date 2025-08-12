@@ -94,12 +94,12 @@ func TestValidate(t *testing.T) {
 				VolumePolicies: []VolumePolicy{
 					{
 						Action: Action{Type: "skip"},
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"capacity":     "0,10Gi",
 							"unknown":      "",
 							"storageClass": []string{"gp2", "ebs-sc"},
-							"csi": interface{}(
-								map[string]interface{}{
+							"csi": any(
+								map[string]any{
 									"driver": "aws.efs.csi.driver",
 								}),
 						},
@@ -115,11 +115,11 @@ func TestValidate(t *testing.T) {
 				VolumePolicies: []VolumePolicy{
 					{
 						Action: Action{Type: "skip"},
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"capacity":     "10Gi",
 							"storageClass": []string{"gp2", "ebs-sc"},
-							"csi": interface{}(
-								map[string]interface{}{
+							"csi": any(
+								map[string]any{
 									"driver": "aws.efs.csi.driver",
 								}),
 						},
@@ -135,11 +135,11 @@ func TestValidate(t *testing.T) {
 				VolumePolicies: []VolumePolicy{
 					{
 						Action: Action{Type: "skip"},
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"capacity":     "0,10Gi",
 							"storageClass": "ebs-sc",
-							"csi": interface{}(
-								map[string]interface{}{
+							"csi": any(
+								map[string]any{
 									"driver": "aws.efs.csi.driver",
 								}),
 						},
@@ -155,10 +155,51 @@ func TestValidate(t *testing.T) {
 				VolumePolicies: []VolumePolicy{
 					{
 						Action: Action{Type: "skip"},
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"capacity":     "0,10Gi",
 							"storageClass": []string{"gp2", "ebs-sc"},
 							"csi":          "aws.efs.csi.driver",
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "error format of csi driver",
+			res: &ResourcePolicies{
+				Version: "v1",
+				VolumePolicies: []VolumePolicy{
+					{
+						Action: Action{Type: "skip"},
+						Conditions: map[string]any{
+							"capacity":     "0,10Gi",
+							"storageClass": []string{"gp2", "ebs-sc"},
+							"csi": any(
+								map[string]any{
+									"driver": []string{"aws.efs.csi.driver"},
+								}),
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "error format of csi driver volumeAttributes",
+			res: &ResourcePolicies{
+				Version: "v1",
+				VolumePolicies: []VolumePolicy{
+					{
+						Action: Action{Type: "skip"},
+						Conditions: map[string]any{
+							"capacity":     "0,10Gi",
+							"storageClass": []string{"gp2", "ebs-sc"},
+							"csi": any(
+								map[string]any{
+									"driver":           "aws.efs.csi.driver",
+									"volumeAttributes": "test",
+								}),
 						},
 					},
 				},
@@ -172,10 +213,10 @@ func TestValidate(t *testing.T) {
 				VolumePolicies: []VolumePolicy{
 					{
 						Action: Action{Type: "skip"},
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"capacity": "0,10Gi",
-							"csi": interface{}(
-								map[string]interface{}{
+							"csi": any(
+								map[string]any{
 									"driver": "aws.efs.csi.driver",
 								}),
 						},
@@ -191,10 +232,10 @@ func TestValidate(t *testing.T) {
 				VolumePolicies: []VolumePolicy{
 					{
 						Action: Action{Type: "unsupported"},
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"capacity": "0,10Gi",
-							"csi": interface{}(
-								map[string]interface{}{
+							"csi": any(
+								map[string]any{
 									"driver": "aws.efs.csi.driver",
 								}),
 						},
@@ -210,7 +251,7 @@ func TestValidate(t *testing.T) {
 				VolumePolicies: []VolumePolicy{
 					{
 						Action: Action{Type: "skip"},
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"capacity":     "0,10Gi",
 							"storageClass": []string{"gp2", "ebs-sc"},
 							"nfs":          "aws.efs.csi.driver",
@@ -221,21 +262,80 @@ func TestValidate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "supported format volume policies only csi driver",
+			res: &ResourcePolicies{
+				Version: "v1",
+				VolumePolicies: []VolumePolicy{
+					{
+						Action: Action{Type: "skip"},
+						Conditions: map[string]any{
+							"csi": any(
+								map[string]any{
+									"driver": "aws.efs.csi.driver",
+								}),
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "unsupported format volume policies only csi volumeattributes",
+			res: &ResourcePolicies{
+				Version: "v1",
+				VolumePolicies: []VolumePolicy{
+					{
+						Action: Action{Type: "skip"},
+						Conditions: map[string]any{
+							"csi": any(
+								map[string]any{
+									"volumeAttributes": map[string]string{
+										"key1": "value1",
+									},
+								}),
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "supported format volume policies with csi driver and volumeattributes",
+			res: &ResourcePolicies{
+				Version: "v1",
+				VolumePolicies: []VolumePolicy{
+					{
+						Action: Action{Type: "skip"},
+						Conditions: map[string]any{
+							"csi": any(
+								map[string]any{
+									"driver": "aws.efs.csi.driver",
+									"volumeAttributes": map[string]string{
+										"key1": "value1",
+									},
+								}),
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
 			name: "supported format volume policies",
 			res: &ResourcePolicies{
 				Version: "v1",
 				VolumePolicies: []VolumePolicy{
 					{
 						Action: Action{Type: "skip"},
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"capacity":     "0,10Gi",
 							"storageClass": []string{"gp2", "ebs-sc"},
-							"csi": interface{}(
-								map[string]interface{}{
+							"csi": any(
+								map[string]any{
 									"driver": "aws.efs.csi.driver",
 								}),
-							"nfs": interface{}(
-								map[string]interface{}{
+							"nfs": any(
+								map[string]any{
 									"server": "192.168.20.90",
 									"path":   "/mnt/data/",
 								}),
@@ -252,15 +352,15 @@ func TestValidate(t *testing.T) {
 				VolumePolicies: []VolumePolicy{
 					{
 						Action: Action{Type: "snapshot"},
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"capacity":     "0,10Gi",
 							"storageClass": []string{"gp2", "ebs-sc"},
-							"csi": interface{}(
-								map[string]interface{}{
+							"csi": any(
+								map[string]any{
 									"driver": "aws.efs.csi.driver",
 								}),
-							"nfs": interface{}(
-								map[string]interface{}{
+							"nfs": any(
+								map[string]any{
 									"server": "192.168.20.90",
 									"path":   "/mnt/data/",
 								}),
@@ -277,15 +377,15 @@ func TestValidate(t *testing.T) {
 				VolumePolicies: []VolumePolicy{
 					{
 						Action: Action{Type: "fs-backup"},
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"capacity":     "0,10Gi",
 							"storageClass": []string{"gp2", "ebs-sc"},
-							"csi": interface{}(
-								map[string]interface{}{
+							"csi": any(
+								map[string]any{
 									"driver": "aws.efs.csi.driver",
 								}),
-							"nfs": interface{}(
-								map[string]interface{}{
+							"nfs": any(
+								map[string]any{
 									"server": "192.168.20.90",
 									"path":   "/mnt/data/",
 								}),
@@ -302,15 +402,15 @@ func TestValidate(t *testing.T) {
 				VolumePolicies: []VolumePolicy{
 					{
 						Action: Action{Type: Snapshot},
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"storageClass": []string{"gp2"},
 						},
 					},
 					{
 						Action: Action{Type: FSBackup},
-						Conditions: map[string]interface{}{
-							"nfs": interface{}(
-								map[string]interface{}{
+						Conditions: map[string]any{
+							"nfs": any(
+								map[string]any{
 									"server": "192.168.20.90",
 									"path":   "/mnt/data/",
 								}),
@@ -319,6 +419,39 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			wantErr: false,
+		},
+		{
+			name: "supported format volume policies with pvcLabels (valid map)",
+			res: &ResourcePolicies{
+				Version: "v1",
+				VolumePolicies: []VolumePolicy{
+					{
+						Action: Action{Type: "skip"},
+						Conditions: map[string]any{
+							"pvcLabels": map[string]string{
+								"environment": "production",
+								"app":         "database",
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "error format volume policies with pvcLabels (not a map)",
+			res: &ResourcePolicies{
+				Version: "v1",
+				VolumePolicies: []VolumePolicy{
+					{
+						Action: Action{Type: "skip"},
+						Conditions: map[string]any{
+							"pvcLabels": "production",
+						},
+					},
+				},
+			},
+			wantErr: true,
 		},
 	}
 	for _, tc := range testCases {

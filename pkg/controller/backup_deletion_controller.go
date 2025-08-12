@@ -23,6 +23,7 @@ import (
 	"time"
 
 	jsonpatch "github.com/evanphx/json-patch/v5"
+	snapshotv1api "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
@@ -52,8 +53,10 @@ import (
 	repomanager "github.com/vmware-tanzu/velero/pkg/repository/manager"
 	repotypes "github.com/vmware-tanzu/velero/pkg/repository/types"
 	"github.com/vmware-tanzu/velero/pkg/util/boolptr"
+	"github.com/vmware-tanzu/velero/pkg/util/csi"
 	"github.com/vmware-tanzu/velero/pkg/util/filesystem"
 	"github.com/vmware-tanzu/velero/pkg/util/kube"
+	veleroutil "github.com/vmware-tanzu/velero/pkg/util/velero"
 )
 
 const (
@@ -107,7 +110,7 @@ func (r *backupDeletionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	s := kube.NewPeriodicalEnqueueSource(r.logger.WithField("controller", constant.ControllerBackupDeletion), mgr.GetClient(), &velerov1api.DeleteBackupRequestList{}, time.Hour, kube.PeriodicalEnqueueSourceOption{})
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&velerov1api.DeleteBackupRequest{}).
-		WatchesRawSource(s, nil).
+		WatchesRawSource(s).
 		Complete(r)
 }
 
@@ -198,6 +201,11 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
+	if !veleroutil.BSLIsAvailable(*location) {
+		err := r.patchDeleteBackupRequestWithError(ctx, dbr, fmt.Errorf("cannot delete backup because backup storage location %s is currently in Unavailable state", location.Name))
+		return ctrl.Result{}, err
+	}
+
 	// if the request object has no labels defined, initialize an empty map since
 	// we will be updating labels
 	if dbr.Labels == nil {
@@ -251,12 +259,16 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 	// don't defer CleanupClients here, since it was already called above.
 
+	var errs []string
+
 	if len(actions) > 0 {
 		// Download the tarball
 		backupFile, err := downloadToTempFile(backup.Name, backupStore, log)
 
 		if err != nil {
 			log.WithError(err).Errorf("Unable to download tarball for backup %s, skipping associated DeleteItemAction plugins", backup.Name)
+			log.Info("Cleaning up CSI volumesnapshots")
+			r.deleteCSIVolumeSnapshotsIfAny(ctx, backup, log)
 		} else {
 			defer closeAndRemoveFile(backupFile, r.logger)
 			deleteCtx := &delete.Context{
@@ -278,8 +290,6 @@ func (r *backupDeletionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			}
 		}
 	}
-
-	var errs []string
 
 	if backupStore != nil {
 		log.Info("Removing PV snapshots")
@@ -495,6 +505,24 @@ func (r *backupDeletionReconciler) deleteExistingDeletionRequests(ctx context.Co
 	return errs
 }
 
+// deleteCSIVolumeSnapshotsIfAny clean up the CSI snapshots created by the backup, this should be called when the backup is failed
+// when it's running, e.g. due to velero pod restart, and the backup.tar is failed to be downloaded from storage.
+func (r *backupDeletionReconciler) deleteCSIVolumeSnapshotsIfAny(ctx context.Context, backup *velerov1api.Backup, log logrus.FieldLogger) {
+	vsList := snapshotv1api.VolumeSnapshotList{}
+	if err := r.Client.List(ctx, &vsList, &client.ListOptions{
+		LabelSelector: labels.SelectorFromSet(map[string]string{
+			velerov1api.BackupNameLabel: label.GetValidName(backup.Name),
+		}),
+	}); err != nil {
+		log.WithError(err).Warnf("Could not list volume snapshots, abort")
+		return
+	}
+	for _, item := range vsList.Items {
+		vs := item
+		csi.CleanupVolumeSnapshot(&vs, r.Client, log)
+	}
+}
+
 func (r *backupDeletionReconciler) deletePodVolumeSnapshots(ctx context.Context, backup *velerov1api.Backup) []error {
 	if r.repoMgr == nil {
 		return nil
@@ -529,7 +557,7 @@ func (r *backupDeletionReconciler) deleteMovedSnapshots(ctx context.Context, bac
 	directSnapshots := map[string][]repotypes.SnapshotIdentifier{}
 	for i := range list.Items {
 		cm := list.Items[i]
-		if cm.Data == nil || len(cm.Data) == 0 {
+		if len(cm.Data) == 0 {
 			errs = append(errs, errors.New("no snapshot info in config"))
 			continue
 		}

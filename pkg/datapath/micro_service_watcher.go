@@ -104,7 +104,7 @@ func newMicroServiceBRWatcher(client client.Client, kubeClient kubernetes.Interf
 	return ms
 }
 
-func (ms *microServiceBRWatcher) Init(ctx context.Context, param interface{}) error {
+func (ms *microServiceBRWatcher) Init(ctx context.Context, param any) error {
 	eventInformer, err := ms.mgr.GetCache().GetInformer(ctx, &v1.Event{})
 	if err != nil {
 		return errors.Wrap(err, "error getting event informer")
@@ -117,7 +117,7 @@ func (ms *microServiceBRWatcher) Init(ctx context.Context, param interface{}) er
 
 	eventHandler, err := eventInformer.AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
+			AddFunc: func(obj any) {
 				evt := obj.(*v1.Event)
 				if evt.InvolvedObject.Namespace != ms.namespace || evt.InvolvedObject.Name != ms.associatedObject {
 					return
@@ -125,7 +125,7 @@ func (ms *microServiceBRWatcher) Init(ctx context.Context, param interface{}) er
 
 				ms.eventCh <- evt
 			},
-			UpdateFunc: func(_, obj interface{}) {
+			UpdateFunc: func(_, obj any) {
 				evt := obj.(*v1.Event)
 				if evt.InvolvedObject.Namespace != ms.namespace || evt.InvolvedObject.Name != ms.associatedObject {
 					return
@@ -141,7 +141,7 @@ func (ms *microServiceBRWatcher) Init(ctx context.Context, param interface{}) er
 
 	podHandler, err := podInformer.AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
-			UpdateFunc: func(_, obj interface{}) {
+			UpdateFunc: func(_, obj any) {
 				pod := obj.(*v1.Pod)
 				if pod.Namespace != ms.namespace || pod.Name != ms.thisPod {
 					return
@@ -213,7 +213,7 @@ func (ms *microServiceBRWatcher) close() {
 	}
 }
 
-func (ms *microServiceBRWatcher) StartBackup(source AccessPoint, uploaderConfig map[string]string, param interface{}) error {
+func (ms *microServiceBRWatcher) StartBackup(source AccessPoint, uploaderConfig map[string]string, param any) error {
 	ms.log.Infof("Start watching backup ms for source %v", source.ByPath)
 
 	ms.startWatch()
@@ -251,7 +251,7 @@ var funcRedirectLog = redirectDataMoverLogs
 var funcGetResultFromMessage = getResultFromMessage
 var funcGetProgressFromMessage = getProgressFromMessage
 
-var eventWaitTimeout time.Duration = time.Minute
+var eventWaitTimeout = time.Minute
 
 func (ms *microServiceBRWatcher) startWatch() {
 	ms.wgWatcher.Add(1)
@@ -320,7 +320,9 @@ func (ms *microServiceBRWatcher) startWatch() {
 		logger.Info("Calling callback on data path pod termination")
 
 		if lastPod.Status.Phase == v1.PodSucceeded {
-			ms.callbacks.OnCompleted(ms.ctx, ms.namespace, ms.taskName, funcGetResultFromMessage(ms.taskType, terminateMessage, ms.log))
+			result := funcGetResultFromMessage(ms.taskType, terminateMessage, ms.log)
+			ms.callbacks.OnProgress(ms.ctx, ms.namespace, ms.taskName, getCompletionProgressFromResult(ms.taskType, result))
+			ms.callbacks.OnCompleted(ms.ctx, ms.namespace, ms.taskName, result)
 		} else {
 			if strings.HasSuffix(terminateMessage, ErrCancelled) {
 				ms.callbacks.OnCancelled(ms.ctx, ms.namespace, ms.taskName)
@@ -385,6 +387,19 @@ func getProgressFromMessage(message string, logger logrus.FieldLogger) *uploader
 	err := json.Unmarshal([]byte(message), progress)
 	if err != nil {
 		logger.WithError(err).Debugf("Failed to unmarshal progress message %s", message)
+	}
+
+	return progress
+}
+
+func getCompletionProgressFromResult(taskType string, result Result) *uploader.Progress {
+	progress := &uploader.Progress{}
+	if taskType == TaskTypeBackup {
+		progress.BytesDone = result.Backup.TotalBytes
+		progress.TotalBytes = result.Backup.TotalBytes
+	} else {
+		progress.BytesDone = result.Restore.TotalBytes
+		progress.TotalBytes = result.Restore.TotalBytes
 	}
 
 	return progress

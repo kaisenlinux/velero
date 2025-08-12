@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Velero binary build section
-FROM --platform=$BUILDPLATFORM golang:1.22.10-bookworm AS velero-builder
+FROM --platform=$BUILDPLATFORM golang:1.23.11-bookworm AS velero-builder
 
 ARG GOPROXY
 ARG BIN
@@ -42,13 +42,16 @@ RUN mkdir -p /output/usr/bin && \
     export GOARM=$( echo "${GOARM}" | cut -c2-) && \
     go build -o /output/${BIN} \
     -ldflags "${LDFLAGS}" ${PKG}/cmd/${BIN} && \
+    go build -o /output/velero-restore-helper \
+    -ldflags "${LDFLAGS}" ${PKG}/cmd/velero-restore-helper && \
     go build -o /output/velero-helper \
     -ldflags "${LDFLAGS}" ${PKG}/cmd/velero-helper && \
     go clean -modcache -cache
 
 # Restic binary build section
-FROM --platform=$BUILDPLATFORM golang:1.22.10-bookworm AS restic-builder
+FROM --platform=$BUILDPLATFORM golang:1.23.11-bookworm AS restic-builder
 
+ARG GOPROXY
 ARG BIN
 ARG TARGETOS
 ARG TARGETARCH
@@ -70,7 +73,7 @@ RUN mkdir -p /output/usr/bin && \
     go clean -modcache -cache
 
 # Velero image packing section
-FROM paketobuildpacks/run-jammy-tiny:0.2.56
+FROM paketobuildpacks/run-jammy-tiny:0.2.73
 
 LABEL maintainer="Xun Jiang <jxun@vmware.com>"
 
@@ -79,4 +82,3 @@ COPY --from=velero-builder /output /
 COPY --from=restic-builder /output /
 
 USER cnb:cnb
-

@@ -57,7 +57,7 @@ func TestVolumeHelperImpl_ShouldPerformSnapshot(t *testing.T) {
 				Version: "v1",
 				VolumePolicies: []resourcepolicies.VolumePolicy{
 					{
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"storageClass": []string{"gp2-csi"},
 						},
 						Action: resourcepolicies.Action{
@@ -78,7 +78,7 @@ func TestVolumeHelperImpl_ShouldPerformSnapshot(t *testing.T) {
 				Version: "v1",
 				VolumePolicies: []resourcepolicies.VolumePolicy{
 					{
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"storageClass": []string{"gp2-csi"},
 						},
 						Action: resourcepolicies.Action{
@@ -99,7 +99,7 @@ func TestVolumeHelperImpl_ShouldPerformSnapshot(t *testing.T) {
 				Version: "v1",
 				VolumePolicies: []resourcepolicies.VolumePolicy{
 					{
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"storageClass": []string{"gp2-csi"},
 						},
 						Action: resourcepolicies.Action{
@@ -121,7 +121,7 @@ func TestVolumeHelperImpl_ShouldPerformSnapshot(t *testing.T) {
 				Version: "v1",
 				VolumePolicies: []resourcepolicies.VolumePolicy{
 					{
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"storageClass": []string{"gp2-csi"},
 						},
 						Action: resourcepolicies.Action{
@@ -152,7 +152,7 @@ func TestVolumeHelperImpl_ShouldPerformSnapshot(t *testing.T) {
 				Version: "v1",
 				VolumePolicies: []resourcepolicies.VolumePolicy{
 					{
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"storageClass": []string{"gp2-csi"},
 						},
 						Action: resourcepolicies.Action{
@@ -186,7 +186,7 @@ func TestVolumeHelperImpl_ShouldPerformSnapshot(t *testing.T) {
 				Version: "v1",
 				VolumePolicies: []resourcepolicies.VolumePolicy{
 					{
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"storageClass": []string{"gp2-csi"},
 						},
 						Action: resourcepolicies.Action{
@@ -220,7 +220,7 @@ func TestVolumeHelperImpl_ShouldPerformSnapshot(t *testing.T) {
 				Version: "v1",
 				VolumePolicies: []resourcepolicies.VolumePolicy{
 					{
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"storageClass": []string{"gp2-csi"},
 						},
 						Action: resourcepolicies.Action{
@@ -253,7 +253,7 @@ func TestVolumeHelperImpl_ShouldPerformSnapshot(t *testing.T) {
 				Version: "v1",
 				VolumePolicies: []resourcepolicies.VolumePolicy{
 					{
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"storageClass": []string{"gp2-csi"},
 						},
 						Action: resourcepolicies.Action{
@@ -314,7 +314,7 @@ func TestVolumeHelperImpl_ShouldPerformSnapshot(t *testing.T) {
 				fakeClient.Create(context.Background(), tc.pod)
 			}
 
-			var p *resourcepolicies.Policies = nil
+			var p *resourcepolicies.Policies
 			if tc.resourcePolicies != nil {
 				p = &resourcepolicies.Policies{}
 				err := p.BuildPolicy(tc.resourcePolicies)
@@ -465,7 +465,7 @@ func TestVolumeHelperImpl_ShouldIncludeVolumeInBackup(t *testing.T) {
 				Version: "v1",
 				VolumePolicies: []resourcepolicies.VolumePolicy{
 					{
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"storageClass": []string{"gp2-csi"},
 						},
 						Action: resourcepolicies.Action{
@@ -540,7 +540,7 @@ func TestVolumeHelperImpl_ShouldPerformFSBackup(t *testing.T) {
 				Version: "v1",
 				VolumePolicies: []resourcepolicies.VolumePolicy{
 					{
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"storageClass": []string{"gp2-csi"},
 						},
 						Action: resourcepolicies.Action{
@@ -566,7 +566,7 @@ func TestVolumeHelperImpl_ShouldPerformFSBackup(t *testing.T) {
 				Version: "v1",
 				VolumePolicies: []resourcepolicies.VolumePolicy{
 					{
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"volumeTypes": []string{"emptyDir"},
 						},
 						Action: resourcepolicies.Action{
@@ -600,7 +600,7 @@ func TestVolumeHelperImpl_ShouldPerformFSBackup(t *testing.T) {
 				Version: "v1",
 				VolumePolicies: []resourcepolicies.VolumePolicy{
 					{
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"storageClass": []string{"gp2-csi"},
 						},
 						Action: resourcepolicies.Action{
@@ -635,7 +635,7 @@ func TestVolumeHelperImpl_ShouldPerformFSBackup(t *testing.T) {
 				Version: "v1",
 				VolumePolicies: []resourcepolicies.VolumePolicy{
 					{
-						Conditions: map[string]interface{}{
+						Conditions: map[string]any{
 							"storageClass": []string{"gp3-csi"},
 						},
 						Action: resourcepolicies.Action{
@@ -679,7 +679,7 @@ func TestVolumeHelperImpl_ShouldPerformFSBackup(t *testing.T) {
 				fakeClient.Create(context.Background(), tc.pod)
 			}
 
-			var p *resourcepolicies.Policies = nil
+			var p *resourcepolicies.Policies
 			if tc.resourcePolicies != nil {
 				p = &resourcepolicies.Policies{}
 				err := p.BuildPolicy(tc.resourcePolicies)
@@ -705,4 +705,38 @@ func TestVolumeHelperImpl_ShouldPerformFSBackup(t *testing.T) {
 			require.Equalf(t, tc.shouldFSBackup, actualShouldFSBackup, "Want shouldFSBackup as %t; Got shouldFSBackup as %t", tc.shouldFSBackup, actualShouldFSBackup)
 		})
 	}
+}
+
+func TestGetVolumeFromResource(t *testing.T) {
+	helper := &volumeHelperImpl{}
+
+	t.Run("PersistentVolume input", func(t *testing.T) {
+		pv := &corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "test-pv",
+			},
+		}
+		outPV, outPod, err := helper.getVolumeFromResource(pv)
+		assert.NoError(t, err)
+		assert.NotNil(t, outPV)
+		assert.Nil(t, outPod)
+		assert.Equal(t, "test-pv", outPV.Name)
+	})
+
+	t.Run("Volume input", func(t *testing.T) {
+		vol := &corev1.Volume{
+			Name: "test-volume",
+		}
+		outPV, outPod, err := helper.getVolumeFromResource(vol)
+		assert.NoError(t, err)
+		assert.Nil(t, outPV)
+		assert.NotNil(t, outPod)
+		assert.Equal(t, "test-volume", outPod.Name)
+	})
+
+	t.Run("Invalid input", func(t *testing.T) {
+		_, _, err := helper.getVolumeFromResource("invalid")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "resource is not a PersistentVolume or Volume")
+	})
 }

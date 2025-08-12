@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM --platform=$TARGETPLATFORM golang:1.22.10-bookworm
+FROM --platform=$TARGETPLATFORM golang:1.23.11-bookworm
 
 ARG GOPROXY
 
@@ -30,7 +30,7 @@ RUN wget --quiet https://github.com/kubernetes-sigs/kubebuilder/releases/downloa
     chmod +x /usr/local/kubebuilder/bin/kubebuilder
 
 # get controller-tools
-RUN go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.14.0
+RUN go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.5
 
 # get goimports (the revision is pinned so we don't indiscriminately update, but the particular commit
 # is not important)
@@ -94,7 +94,7 @@ RUN ARCH=$(go env GOARCH) && \
     chmod +x /usr/bin/goreleaser
 
 # get golangci-lint
-RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.57.2
+RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.64.5
 
 # install kubectl
 RUN curl -LO https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/$(go env GOARCH)/kubectl

@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1api "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	testclocks "k8s.io/utils/clock/testing"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -38,10 +39,12 @@ import (
 	"github.com/vmware-tanzu/velero/internal/volume"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/builder"
+	"github.com/vmware-tanzu/velero/pkg/itemoperation"
 	"github.com/vmware-tanzu/velero/pkg/metrics"
 	persistencemocks "github.com/vmware-tanzu/velero/pkg/persistence/mocks"
 	"github.com/vmware-tanzu/velero/pkg/plugin/clientmgmt"
 	pluginmocks "github.com/vmware-tanzu/velero/pkg/plugin/mocks"
+	"github.com/vmware-tanzu/velero/pkg/plugin/velero"
 	velerotest "github.com/vmware-tanzu/velero/pkg/test"
 	pkgUtilKubeMocks "github.com/vmware-tanzu/velero/pkg/util/kube/mocks"
 	"github.com/vmware-tanzu/velero/pkg/util/results"
@@ -145,6 +148,7 @@ func TestRestoreFinalizerReconcile(t *testing.T) {
 			if test.restore != nil && test.restore.Namespace == velerov1api.DefaultNamespace {
 				require.NoError(t, r.Client.Create(context.Background(), test.restore))
 				backupStore.On("GetRestoredResourceList", test.restore.Name).Return(map[string][]string{}, nil)
+				backupStore.On("GetRestoreItemOperations", test.restore.Name).Return([]*itemoperation.RestoreOperation{}, nil)
 			}
 			if test.backup != nil {
 				assert.NoError(t, r.Client.Create(context.Background(), test.backup))
@@ -467,14 +471,14 @@ func TestWaitRestoreExecHook(t *testing.T) {
 
 	hookTracker2 := hook.NewMultiHookTracker()
 	restoreName2 := "restore2"
-	hookTracker2.Add(restoreName2, "ns", "pod", "con1", "s1", "h1", "")
-	hookTracker2.Record(restoreName2, "ns", "pod", "con1", "s1", "h1", "", false, nil)
+	hookTracker2.Add(restoreName2, "ns", "pod", "con1", "s1", "h1", "", 0)
+	hookTracker2.Record(restoreName2, "ns", "pod", "con1", "s1", "h1", "", 0, false, nil)
 
 	hookTracker3 := hook.NewMultiHookTracker()
 	restoreName3 := "restore3"
 	podNs, podName, container, source, hookName := "ns", "pod", "con1", "s1", "h1"
 	hookFailed, hookErr := true, fmt.Errorf("hook failed")
-	hookTracker3.Add(restoreName3, podNs, podName, container, source, hookName, hook.PhasePre)
+	hookTracker3.Add(restoreName3, podNs, podName, container, source, hookName, hook.PhasePre, 0)
 
 	tests := []struct {
 		name                   string
@@ -542,7 +546,7 @@ func TestWaitRestoreExecHook(t *testing.T) {
 		if tc.waitSec > 0 {
 			go func() {
 				time.Sleep(time.Second * time.Duration(tc.waitSec))
-				tc.hookTracker.Record(tc.restore.Name, tc.podNs, tc.podName, tc.Container, tc.Source, tc.hookName, hook.PhasePre, tc.hookFailed, tc.hookErr)
+				tc.hookTracker.Record(tc.restore.Name, tc.podNs, tc.podName, tc.Container, tc.Source, tc.hookName, hook.PhasePre, 0, tc.hookFailed, tc.hookErr)
 			}()
 		}
 
@@ -624,6 +628,115 @@ func Test_restoreFinalizerReconciler_finishProcessing(t *testing.T) {
 			if !tt.args.mockClientAsserts(client) {
 				t.Errorf("mockClientAsserts() failed")
 			}
+		})
+	}
+}
+
+func TestRestoreOperationList(t *testing.T) {
+	var empty []*itemoperation.RestoreOperation
+	tests := []struct {
+		name         string
+		items        []*itemoperation.RestoreOperation
+		inputPVCNS   string
+		inputPVCName string
+		expected     []*itemoperation.RestoreOperation
+	}{
+		{
+			name:         "no restore operations",
+			items:        []*itemoperation.RestoreOperation{},
+			inputPVCNS:   "ns-1",
+			inputPVCName: "pvc-1",
+			expected:     empty,
+		},
+		{
+			name: "one operation with matched info and a nil element",
+			items: []*itemoperation.RestoreOperation{
+				nil,
+				{
+					Spec: itemoperation.RestoreOperationSpec{
+						RestoreName:       "restore-1",
+						RestoreUID:        "uid-1",
+						RestoreItemAction: "velero.io/csi-pvc-restorer",
+						OperationID:       "dd-abbb048d-7036-4855-bf50-ebba978b59a6.2426dd0e-b863-4222b5b2b",
+						ResourceIdentifier: velero.ResourceIdentifier{
+							GroupResource: schema.GroupResource{
+								Group:    "",
+								Resource: "persistentvolumeclaims",
+							},
+							Namespace: "ns-1",
+							Name:      "pvc-1",
+						},
+					},
+					Status: itemoperation.OperationStatus{
+						Phase:          itemoperation.OperationPhaseCompleted,
+						OperationUnits: "Byte",
+						Description:    "Completed",
+					},
+				},
+			},
+			inputPVCNS:   "ns-1",
+			inputPVCName: "pvc-1",
+			expected: []*itemoperation.RestoreOperation{
+				{
+					Spec: itemoperation.RestoreOperationSpec{
+						RestoreName:       "restore-1",
+						RestoreUID:        "uid-1",
+						RestoreItemAction: "velero.io/csi-pvc-restorer",
+						OperationID:       "dd-abbb048d-7036-4855-bf50-ebba978b59a6.2426dd0e-b863-4222b5b2b",
+						ResourceIdentifier: velero.ResourceIdentifier{
+							GroupResource: schema.GroupResource{
+								Group:    "",
+								Resource: "persistentvolumeclaims",
+							},
+							Namespace: "ns-1",
+							Name:      "pvc-1",
+						},
+					},
+					Status: itemoperation.OperationStatus{
+						Phase:          itemoperation.OperationPhaseCompleted,
+						OperationUnits: "Byte",
+						Description:    "Completed",
+					},
+				},
+			},
+		},
+		{
+			name: "one operation with incorrect resource type",
+			items: []*itemoperation.RestoreOperation{
+				{
+					Spec: itemoperation.RestoreOperationSpec{
+						RestoreName:       "restore-1",
+						RestoreUID:        "uid-1",
+						RestoreItemAction: "velero.io/csi-pvc-restorer",
+						OperationID:       "dd-abbb048d-7036-4855-bf50-ebba978b59a6.2426dd0e-b863-4222b5b2b",
+						ResourceIdentifier: velero.ResourceIdentifier{
+							GroupResource: schema.GroupResource{
+								Group:    "",
+								Resource: "configmaps",
+							},
+							Namespace: "ns-1",
+							Name:      "pvc-1",
+						},
+					},
+					Status: itemoperation.OperationStatus{
+						Phase:          itemoperation.OperationPhaseCompleted,
+						OperationUnits: "Byte",
+						Description:    "Completed",
+					},
+				},
+			},
+			inputPVCNS:   "ns-1",
+			inputPVCName: "pvc-1",
+			expected:     empty,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l := restoreItemOperationList{
+				items: tt.items,
+			}
+			assert.Equal(t, tt.expected, l.SelectByPVC(tt.inputPVCNS, tt.inputPVCName))
 		})
 	}
 }

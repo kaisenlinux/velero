@@ -85,7 +85,7 @@ func newFileSystemBR(jobName string, requestorType string, client client.Client,
 	return fs
 }
 
-func (fs *fileSystemBR) Init(ctx context.Context, param interface{}) error {
+func (fs *fileSystemBR) Init(ctx context.Context, param any) error {
 	initParam := param.(*FSBRInitParam)
 
 	var err error
@@ -164,7 +164,7 @@ func (fs *fileSystemBR) close(ctx context.Context) {
 	}
 }
 
-func (fs *fileSystemBR) StartBackup(source AccessPoint, uploaderConfig map[string]string, param interface{}) error {
+func (fs *fileSystemBR) StartBackup(source AccessPoint, uploaderConfig map[string]string, param any) error {
 	if !fs.initialized {
 		return errors.New("file system data path is not initialized")
 	}
@@ -181,7 +181,7 @@ func (fs *fileSystemBR) StartBackup(source AccessPoint, uploaderConfig map[strin
 			fs.wgDataPath.Done()
 		}()
 
-		snapshotID, emptySnapshot, err := fs.uploaderProv.RunBackup(fs.ctx, source.ByPath, backupParam.RealSource, backupParam.Tags, backupParam.ForceFull,
+		snapshotID, emptySnapshot, totalBytes, err := fs.uploaderProv.RunBackup(fs.ctx, source.ByPath, backupParam.RealSource, backupParam.Tags, backupParam.ForceFull,
 			backupParam.ParentSnapshot, source.VolMode, uploaderConfig, fs)
 
 		if err == provider.ErrorCanceled {
@@ -193,7 +193,7 @@ func (fs *fileSystemBR) StartBackup(source AccessPoint, uploaderConfig map[strin
 			}
 			fs.callbacks.OnFailed(context.Background(), fs.namespace, fs.jobName, dataPathErr)
 		} else {
-			fs.callbacks.OnCompleted(context.Background(), fs.namespace, fs.jobName, Result{Backup: BackupResult{snapshotID, emptySnapshot, source}})
+			fs.callbacks.OnCompleted(context.Background(), fs.namespace, fs.jobName, Result{Backup: BackupResult{snapshotID, emptySnapshot, source, totalBytes}})
 		}
 	}()
 
@@ -215,7 +215,7 @@ func (fs *fileSystemBR) StartRestore(snapshotID string, target AccessPoint, uplo
 			fs.wgDataPath.Done()
 		}()
 
-		err := fs.uploaderProv.RunRestore(fs.ctx, snapshotID, target.ByPath, target.VolMode, uploaderConfigs, fs)
+		totalBytes, err := fs.uploaderProv.RunRestore(fs.ctx, snapshotID, target.ByPath, target.VolMode, uploaderConfigs, fs)
 
 		if err == provider.ErrorCanceled {
 			fs.callbacks.OnCancelled(context.Background(), fs.namespace, fs.jobName)
@@ -226,7 +226,7 @@ func (fs *fileSystemBR) StartRestore(snapshotID string, target AccessPoint, uplo
 			}
 			fs.callbacks.OnFailed(context.Background(), fs.namespace, fs.jobName, dataPathErr)
 		} else {
-			fs.callbacks.OnCompleted(context.Background(), fs.namespace, fs.jobName, Result{Restore: RestoreResult{Target: target}})
+			fs.callbacks.OnCompleted(context.Background(), fs.namespace, fs.jobName, Result{Restore: RestoreResult{Target: target, TotalBytes: totalBytes}})
 		}
 	}()
 

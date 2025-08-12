@@ -131,13 +131,13 @@ func (p *volumeSnapshotBackupItemAction) Execute(
 		backup.Status.Phase == velerov1api.BackupPhaseFinalizingPartiallyFailed {
 		p.log.
 			WithField("Backup", fmt.Sprintf("%s/%s", backup.Namespace, backup.Name)).
-			WithField("BackupPhase", backup.Status.Phase).Debugf("Clean VolumeSnapshots.")
+			WithField("BackupPhase", backup.Status.Phase).Debugf("Cleaning VolumeSnapshots.")
 
 		if vsc == nil {
 			vsc = &snapshotv1api.VolumeSnapshotContent{}
 		}
 
-		csi.DeleteVolumeSnapshot(*vs, *vsc, backup, p.crClient, p.log)
+		csi.DeleteReadyVolumeSnapshot(*vs, *vsc, p.crClient, p.log)
 		return item, nil, "", nil, nil
 	}
 
@@ -164,6 +164,7 @@ func (p *volumeSnapshotBackupItemAction) Execute(
 				annotations[velerov1api.VolumeSnapshotHandleAnnotation] = *vsc.Status.SnapshotHandle
 				annotations[velerov1api.DriverNameAnnotation] = vsc.Spec.Driver
 			}
+
 			if vsc.Status.RestoreSize != nil {
 				annotations[velerov1api.VolumeSnapshotRestoreSize] = resource.NewQuantity(
 					*vsc.Status.RestoreSize, resource.BinarySI).String()
@@ -372,7 +373,7 @@ func (p *volumeSnapshotBackupItemAction) Cancel(
 func NewVolumeSnapshotBackupItemAction(
 	f client.Factory,
 ) plugincommon.HandlerInitializer {
-	return func(logger logrus.FieldLogger) (interface{}, error) {
+	return func(logger logrus.FieldLogger) (any, error) {
 		crClient, err := f.KubebuilderClient()
 		if err != nil {
 			return nil, errors.WithStack(err)

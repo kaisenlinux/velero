@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bombsimon/logrusr/v3"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -27,8 +28,8 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/vmware-tanzu/velero/internal/credentials"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
@@ -119,7 +120,8 @@ func newdataMoverRestore(logger logrus.FieldLogger, factory client.Factory, conf
 		return nil, errors.Wrap(err, "error to create client config")
 	}
 
-	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+	ctrl.SetLogger(logrusr.New(logger))
+	klog.SetLogger(logrusr.New(logger)) // klog.Logger is used by k8s.io/client-go
 
 	scheme := runtime.NewScheme()
 	if err := velerov1api.AddToScheme(scheme); err != nil {
@@ -160,7 +162,24 @@ func newdataMoverRestore(logger logrus.FieldLogger, factory client.Factory, conf
 		return nil, errors.Wrap(err, "error to create client")
 	}
 
-	cache, err := ctlcache.New(clientConfig, cacheOption)
+	var cache ctlcache.Cache
+	retry := 10
+	for {
+		cache, err = ctlcache.New(clientConfig, cacheOption)
+		if err == nil {
+			break
+		}
+
+		retry--
+		if retry == 0 {
+			break
+		}
+
+		logger.WithError(err).Warn("Failed to create client cache, need retry")
+
+		time.Sleep(time.Second)
+	}
+
 	if err != nil {
 		cancelFunc()
 		return nil, errors.Wrap(err, "error to create client cache")

@@ -33,11 +33,13 @@ type BackupResult struct {
 	SnapshotID    string      `json:"snapshotID"`
 	EmptySnapshot bool        `json:"emptySnapshot"`
 	Source        AccessPoint `json:"source,omitempty"`
+	TotalBytes    int64       `json:"totalBytes,omitempty"`
 }
 
 // RestoreResult represents the result of a restore
 type RestoreResult struct {
-	Target AccessPoint `json:"target,omitempty"`
+	Target     AccessPoint `json:"target,omitempty"`
+	TotalBytes int64       `json:"totalBytes,omitempty"`
 }
 
 // Callbacks defines the collection of callbacks during backup/restore
@@ -57,10 +59,10 @@ type AccessPoint struct {
 // AsyncBR is the interface for asynchronous data path methods
 type AsyncBR interface {
 	// Init initializes an asynchronous data path instance
-	Init(ctx context.Context, param interface{}) error
+	Init(ctx context.Context, param any) error
 
 	// StartBackup starts an asynchronous data path instance for backup
-	StartBackup(source AccessPoint, dataMoverConfig map[string]string, param interface{}) error
+	StartBackup(source AccessPoint, dataMoverConfig map[string]string, param any) error
 
 	// StartRestore starts an asynchronous data path instance for restore
 	StartRestore(snapshotID string, target AccessPoint, dataMoverConfig map[string]string) error

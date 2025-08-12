@@ -47,6 +47,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -82,6 +83,7 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/restore"
 	"github.com/vmware-tanzu/velero/pkg/uploader"
 	"github.com/vmware-tanzu/velero/pkg/util/filesystem"
+	"github.com/vmware-tanzu/velero/pkg/util/kube"
 	"github.com/vmware-tanzu/velero/pkg/util/logging"
 )
 
@@ -135,7 +137,7 @@ type server struct {
 	metricsAddress   string
 	kubeClientConfig *rest.Config
 	kubeClient       kubernetes.Interface
-	discoveryClient  discovery.DiscoveryInterface
+	discoveryClient  discovery.AggregatedDiscoveryInterface
 	discoveryHelper  velerodiscovery.Helper
 	dynamicClient    dynamic.Interface
 	// controller-runtime client. the difference from the controller-manager's client
@@ -238,18 +240,36 @@ func newServer(f client.Factory, config *config.Config, logger *logrus.Logger) (
 	}
 
 	ctrl.SetLogger(logrusr.New(logger))
+	klog.SetLogger(logrusr.New(logger)) // klog.Logger is used by k8s.io/client-go
 
-	mgr, err := ctrl.NewManager(clientConfig, ctrl.Options{
-		Scheme: scheme,
-		Cache: cache.Options{
-			DefaultNamespaces: map[string]cache.Config{
-				f.Namespace(): {},
+	var mgr manager.Manager
+	retry := 10
+	for {
+		mgr, err = ctrl.NewManager(clientConfig, ctrl.Options{
+			Scheme: scheme,
+			Cache: cache.Options{
+				DefaultNamespaces: map[string]cache.Config{
+					f.Namespace(): {},
+				},
 			},
-		},
-	})
+		})
+		if err == nil {
+			break
+		}
+
+		retry--
+		if retry == 0 {
+			break
+		}
+
+		logger.WithError(err).Warn("Failed to create controller manager, need retry")
+
+		time.Sleep(time.Second)
+	}
+
 	if err != nil {
 		cancelFunc()
-		return nil, err
+		return nil, errors.Wrap(err, "error creating controller manager")
 	}
 
 	credentialFileStore, err := credentials.NewNamespacedFileStore(
@@ -269,8 +289,8 @@ func newServer(f client.Factory, config *config.Config, logger *logrus.Logger) (
 		return nil, err
 	}
 
-	var discoveryClient *discovery.DiscoveryClient
-	if discoveryClient, err = discovery.NewDiscoveryClientForConfig(clientConfig); err != nil {
+	var discoveryClient discovery.AggregatedDiscoveryInterface
+	if discoveryClient, err = f.DiscoveryClient(); err != nil {
 		cancelFunc()
 		return nil, err
 	}
@@ -454,10 +474,20 @@ func (s *server) veleroResourcesExist() error {
 
 func (s *server) checkNodeAgent() {
 	// warn if node agent does not exist
-	if err := nodeagent.IsRunning(s.ctx, s.kubeClient, s.namespace); err == nodeagent.ErrDaemonSetNotFound {
-		s.logger.Warn("Velero node agent not found; pod volume backups/restores will not work until it's created")
-	} else if err != nil {
-		s.logger.WithError(errors.WithStack(err)).Warn("Error checking for existence of velero node agent")
+	if kube.WithLinuxNode(s.ctx, s.crClient, s.logger) {
+		if err := nodeagent.IsRunningOnLinux(s.ctx, s.kubeClient, s.namespace); err == nodeagent.ErrDaemonSetNotFound {
+			s.logger.Warn("Velero node agent not found for linux nodes; pod volume backups/restores and data mover backups/restores will not work until it's created")
+		} else if err != nil {
+			s.logger.WithError(errors.WithStack(err)).Warn("Error checking for existence of velero node agent for linux nodes")
+		}
+	}
+
+	if kube.WithWindowsNode(s.ctx, s.crClient, s.logger) {
+		if err := nodeagent.IsRunningOnWindows(s.ctx, s.kubeClient, s.namespace); err == nodeagent.ErrDaemonSetNotFound {
+			s.logger.Warn("Velero node agent not found for Windows nodes; pod volume backups/restores and data mover backups/restores will not work until it's created")
+		} else if err != nil {
+			s.logger.WithError(errors.WithStack(err)).Warn("Error checking for existence of velero node agent for Windows nodes")
+		}
 	}
 }
 
@@ -474,15 +504,9 @@ func (s *server) initRepoManager() error {
 		s.namespace,
 		s.mgr.GetClient(),
 		s.repoLocker,
-		s.repoEnsurer,
 		s.credentialFileStore,
 		s.credentialSecretStore,
-		s.config.RepoMaintenanceJobConfig,
-		s.config.PodResources,
-		s.config.KeepLatestMaintenanceJobs,
 		s.logger,
-		s.logLevel,
-		s.config.LogFormat,
 	)
 
 	return nil
@@ -620,6 +644,7 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 			s.credentialFileStore,
 			s.config.MaxConcurrentK8SConnections,
 			s.config.DefaultSnapshotMoveData,
+			s.config.ItemBlockWorkerCount,
 			s.crClient,
 		).SetupWithManager(s.mgr); err != nil {
 			s.logger.Fatal(err, "unable to create controller", "controller", constant.ControllerBackup)
@@ -702,9 +727,14 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 			s.namespace,
 			s.logger,
 			s.mgr.GetClient(),
+			s.repoManager,
 			s.config.RepoMaintenanceFrequency,
 			s.config.BackupRepoConfig,
-			s.repoManager,
+			s.config.KeepLatestMaintenanceJobs,
+			s.config.RepoMaintenanceJobConfig,
+			s.config.PodResources,
+			s.logLevel,
+			s.config.LogFormat,
 		).SetupWithManager(s.mgr); err != nil {
 			s.logger.Fatal(err, "unable to create controller", "controller", constant.ControllerBackupRepo)
 		}

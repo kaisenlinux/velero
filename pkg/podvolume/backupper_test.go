@@ -260,7 +260,7 @@ func createPodObj(running bool, withVolume bool, withVolumeMounted bool, volumeN
 
 func createNodeAgentPodObj(running bool) *corev1api.Pod {
 	podObj := builder.ForPod(velerov1api.DefaultNamespace, "fake-node-agent").Result()
-	podObj.Labels = map[string]string{"name": "node-agent"}
+	podObj.Labels = map[string]string{"role": "node-agent"}
 
 	if running {
 		podObj.Status.Phase = corev1api.PodRunning
@@ -303,10 +303,19 @@ func createPVBObj(fail bool, withSnapshot bool, index int, uploaderType string) 
 	return pvbObj
 }
 
+func createNodeObj() *corev1api.Node {
+	return builder.ForNode("fake-node-name").Labels(map[string]string{"kubernetes.io/os": "linux"}).Result()
+}
+
+func createWindowsNodeObj() *corev1api.Node {
+	return builder.ForNode("fake-node-name").Labels(map[string]string{"kubernetes.io/os": "windows"}).Result()
+}
+
 func TestBackupPodVolumes(t *testing.T) {
 	scheme := runtime.NewScheme()
 	velerov1api.AddToScheme(scheme)
 	corev1api.AddToScheme(scheme)
+	log := logrus.New()
 
 	tests := []struct {
 		name                  string
@@ -359,12 +368,31 @@ func TestBackupPodVolumes(t *testing.T) {
 			bsl:           "fake-bsl",
 		},
 		{
+			name: "pod is not running on Linux node",
+			volumes: []string{
+				"fake-volume-1",
+				"fake-volume-2",
+			},
+			kubeClientObj: []runtime.Object{
+				createNodeAgentPodObj(true),
+				createWindowsNodeObj(),
+			},
+			sourcePod:    createPodObj(false, false, false, 2),
+			uploaderType: "kopia",
+			errs: []string{
+				"Pod fake-ns/fake-pod is not running in linux node(fake-node-name), skip",
+			},
+		},
+		{
 			name: "node-agent pod is not running in node",
 			volumes: []string{
 				"fake-volume-1",
 				"fake-volume-2",
 			},
-			sourcePod:    createPodObj(true, false, false, 2),
+			sourcePod: createPodObj(true, false, false, 2),
+			kubeClientObj: []runtime.Object{
+				createNodeObj(),
+			},
 			uploaderType: "kopia",
 			errs: []string{
 				"daemonset pod not found in running state in node fake-node-name",
@@ -379,6 +407,7 @@ func TestBackupPodVolumes(t *testing.T) {
 			sourcePod: createPodObj(true, false, false, 2),
 			kubeClientObj: []runtime.Object{
 				createNodeAgentPodObj(true),
+				createNodeObj(),
 			},
 			uploaderType:          "kopia",
 			mockGetRepositoryType: true,
@@ -395,6 +424,7 @@ func TestBackupPodVolumes(t *testing.T) {
 			sourcePod: createPodObj(true, false, false, 2),
 			kubeClientObj: []runtime.Object{
 				createNodeAgentPodObj(true),
+				createNodeObj(),
 			},
 			uploaderType: "kopia",
 			errs: []string{
@@ -410,6 +440,7 @@ func TestBackupPodVolumes(t *testing.T) {
 			sourcePod: createPodObj(true, false, false, 2),
 			kubeClientObj: []runtime.Object{
 				createNodeAgentPodObj(true),
+				createNodeObj(),
 			},
 			ctlClientObj: []runtime.Object{
 				createBackupRepoObj(),
@@ -427,6 +458,7 @@ func TestBackupPodVolumes(t *testing.T) {
 			sourcePod: createPodObj(true, true, false, 2),
 			kubeClientObj: []runtime.Object{
 				createNodeAgentPodObj(true),
+				createNodeObj(),
 			},
 			ctlClientObj: []runtime.Object{
 				createBackupRepoObj(),
@@ -448,6 +480,7 @@ func TestBackupPodVolumes(t *testing.T) {
 			sourcePod: createPodObj(true, true, false, 2),
 			kubeClientObj: []runtime.Object{
 				createNodeAgentPodObj(true),
+				createNodeObj(),
 				createPVCObj(1),
 				createPVCObj(2),
 			},
@@ -471,6 +504,7 @@ func TestBackupPodVolumes(t *testing.T) {
 			sourcePod: createPodObj(true, true, false, 2),
 			kubeClientObj: []runtime.Object{
 				createNodeAgentPodObj(true),
+				createNodeObj(),
 				createPVCObj(1),
 				createPVCObj(2),
 				createPVObj(1, true),
@@ -482,6 +516,7 @@ func TestBackupPodVolumes(t *testing.T) {
 			runtimeScheme: scheme,
 			uploaderType:  "kopia",
 			bsl:           "fake-bsl",
+			errs:          []string{},
 		},
 		{
 			name: "volume not mounted by pod should be skipped",
@@ -492,6 +527,7 @@ func TestBackupPodVolumes(t *testing.T) {
 			sourcePod: createPodObj(true, true, false, 2),
 			kubeClientObj: []runtime.Object{
 				createNodeAgentPodObj(true),
+				createNodeObj(),
 				createPVCObj(1),
 				createPVCObj(2),
 				createPVObj(1, false),
@@ -503,6 +539,7 @@ func TestBackupPodVolumes(t *testing.T) {
 			runtimeScheme: scheme,
 			uploaderType:  "kopia",
 			bsl:           "fake-bsl",
+			errs:          []string{},
 		},
 		{
 			name: "return completed pvbs",
@@ -512,6 +549,7 @@ func TestBackupPodVolumes(t *testing.T) {
 			sourcePod: createPodObj(true, true, true, 1),
 			kubeClientObj: []runtime.Object{
 				createNodeAgentPodObj(true),
+				createNodeObj(),
 				createPVCObj(1),
 				createPVObj(1, false),
 			},
@@ -522,6 +560,7 @@ func TestBackupPodVolumes(t *testing.T) {
 			uploaderType:  "kopia",
 			bsl:           "fake-bsl",
 			pvbs:          1,
+			errs:          []string{},
 		},
 	}
 	// TODO add more verification around PVCBackupSummary returned by "BackupPodVolumes"
@@ -556,7 +595,7 @@ func TestBackupPodVolumes(t *testing.T) {
 			backupObj.Spec.StorageLocation = test.bsl
 
 			factory := NewBackupperFactory(repository.NewRepoLocker(), ensurer, fakeCtrlClient, pvbInformer, velerotest.NewLogger())
-			bp, err := factory.NewBackupper(ctx, backupObj, test.uploaderType)
+			bp, err := factory.NewBackupper(ctx, log, backupObj, test.uploaderType)
 
 			require.NoError(t, err)
 
@@ -568,8 +607,8 @@ func TestBackupPodVolumes(t *testing.T) {
 
 			pvbs, _, errs := bp.BackupPodVolumes(backupObj, test.sourcePod, test.volumes, nil, velerotest.NewLogger())
 
-			if errs == nil {
-				assert.Nil(t, test.errs)
+			if test.errs == nil {
+				assert.NoError(t, err)
 			} else {
 				for i := 0; i < len(errs); i++ {
 					assert.EqualError(t, errs[i], test.errs[i])
@@ -579,6 +618,98 @@ func TestBackupPodVolumes(t *testing.T) {
 			assert.Len(t, pvbs, test.pvbs)
 		})
 	}
+}
+
+func TestGetPodVolumeBackupByPodAndVolume(t *testing.T) {
+	backupper := &backupper{
+		pvbIndexer: cache.NewIndexer(podVolumeBackupKey, cache.Indexers{
+			indexNamePod: podIndexFunc,
+		}),
+	}
+
+	obj := &velerov1api.PodVolumeBackup{
+		Spec: velerov1api.PodVolumeBackupSpec{
+			Pod: corev1api.ObjectReference{
+				Kind:      "Pod",
+				Namespace: "default",
+				Name:      "pod",
+			},
+			Volume: "volume",
+		},
+	}
+
+	err := backupper.pvbIndexer.Add(obj)
+	require.NoError(t, err)
+
+	// incorrect pod namespace
+	pvb, err := backupper.GetPodVolumeBackupByPodAndVolume("invalid-namespace", "pod", "volume")
+	require.NoError(t, err)
+	assert.Nil(t, pvb)
+
+	// incorrect pod name
+	pvb, err = backupper.GetPodVolumeBackupByPodAndVolume("default", "invalid-pod", "volume")
+	require.NoError(t, err)
+	assert.Nil(t, pvb)
+
+	// incorrect volume
+	pvb, err = backupper.GetPodVolumeBackupByPodAndVolume("default", "pod", "invalid-volume")
+	require.NoError(t, err)
+	assert.Nil(t, pvb)
+
+	// correct pod namespace, name and volume
+	pvb, err = backupper.GetPodVolumeBackupByPodAndVolume("default", "pod", "volume")
+	require.NoError(t, err)
+	assert.NotNil(t, pvb)
+}
+
+func TestListPodVolumeBackupsByPodp(t *testing.T) {
+	backupper := &backupper{
+		pvbIndexer: cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
+			indexNamePod: podIndexFunc,
+		}),
+	}
+
+	obj1 := &velerov1api.PodVolumeBackup{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "velero",
+			Name:      "pvb1",
+		},
+		Spec: velerov1api.PodVolumeBackupSpec{
+			Pod: corev1api.ObjectReference{
+				Kind:      "Pod",
+				Namespace: "default",
+				Name:      "pod",
+			},
+		},
+	}
+	obj2 := &velerov1api.PodVolumeBackup{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "velero",
+			Name:      "pvb2",
+		},
+		Spec: velerov1api.PodVolumeBackupSpec{
+			Pod: corev1api.ObjectReference{
+				Kind:      "Pod",
+				Namespace: "default",
+				Name:      "pod",
+			},
+		},
+	}
+
+	err := backupper.pvbIndexer.Add(obj1)
+	require.NoError(t, err)
+	err = backupper.pvbIndexer.Add(obj2)
+	require.NoError(t, err)
+
+	// not exist PVBs
+	pvbs, err := backupper.ListPodVolumeBackupsByPod("invalid-namespace", "invalid-name")
+	require.NoError(t, err)
+	assert.Empty(t, pvbs)
+
+	// exist PVBs
+	pvbs, err = backupper.ListPodVolumeBackupsByPod("default", "pod")
+	require.NoError(t, err)
+	assert.Len(t, pvbs, 2)
 }
 
 type logHook struct {
@@ -594,25 +725,33 @@ func (l *logHook) Fire(entry *logrus.Entry) error {
 }
 
 func TestWaitAllPodVolumesProcessed(t *testing.T) {
-	timeoutCtx, cancelFunc := context.WithTimeout(context.Background(), 1*time.Second)
-	defer func() {
-		cancelFunc()
-	}()
+	timeoutCtx, cancelFunc := context.WithCancel(context.Background())
+	cancelFunc()
+	log := logrus.New()
+	pvb := builder.ForPodVolumeBackup(velerov1api.DefaultNamespace, "pvb").
+		PodNamespace("pod-namespace").PodName("pod-name").Volume("volume").Result()
 	cases := []struct {
 		name              string
 		ctx               context.Context
+		pvb               *velerov1api.PodVolumeBackup
 		statusToBeUpdated *velerov1api.PodVolumeBackupStatus
 		expectedErr       string
 		expectedPVBPhase  velerov1api.PodVolumeBackupPhase
 	}{
 		{
+			name: "contains no pvb should report no error",
+			ctx:  timeoutCtx,
+		},
+		{
 			name:        "context canceled",
 			ctx:         timeoutCtx,
+			pvb:         pvb,
 			expectedErr: "timed out waiting for all PodVolumeBackups to complete",
 		},
 		{
 			name: "failed pvbs",
 			ctx:  context.Background(),
+			pvb:  pvb,
 			statusToBeUpdated: &velerov1api.PodVolumeBackupStatus{
 				Phase:   velerov1api.PodVolumeBackupPhaseFailed,
 				Message: "failed",
@@ -623,6 +762,7 @@ func TestWaitAllPodVolumesProcessed(t *testing.T) {
 		{
 			name: "completed pvbs",
 			ctx:  context.Background(),
+			pvb:  pvb,
 			statusToBeUpdated: &velerov1api.PodVolumeBackupStatus{
 				Phase:   velerov1api.PodVolumeBackupPhaseCompleted,
 				Message: "completed",
@@ -632,10 +772,13 @@ func TestWaitAllPodVolumesProcessed(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		newPVB := builder.ForPodVolumeBackup(velerov1api.DefaultNamespace, "pvb").Result()
+		var objs []ctrlclient.Object
+		if c.pvb != nil {
+			objs = append(objs, c.pvb)
+		}
 		scheme := runtime.NewScheme()
 		velerov1api.AddToScheme(scheme)
-		client := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(newPVB).Build()
+		client := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 
 		lw := kube.InternalLW{
 			Client:     client,
@@ -653,12 +796,15 @@ func TestWaitAllPodVolumesProcessed(t *testing.T) {
 		logHook := &logHook{}
 		logger.Hooks.Add(logHook)
 
-		backuper := newBackupper(c.ctx, nil, nil, informer, nil, "", &velerov1api.Backup{})
-		backuper.wg.Add(1)
+		backuper := newBackupper(c.ctx, log, nil, nil, informer, nil, "", &velerov1api.Backup{})
+		if c.pvb != nil {
+			backuper.pvbIndexer.Add(c.pvb)
+			backuper.wg.Add(1)
+		}
 
 		if c.statusToBeUpdated != nil {
 			pvb := &velerov1api.PodVolumeBackup{}
-			err := client.Get(context.Background(), ctrlclient.ObjectKey{Namespace: newPVB.Namespace, Name: newPVB.Name}, pvb)
+			err := client.Get(context.Background(), ctrlclient.ObjectKey{Namespace: c.pvb.Namespace, Name: c.pvb.Name}, pvb)
 			require.NoError(t, err)
 
 			pvb.Status = *c.statusToBeUpdated
@@ -670,6 +816,8 @@ func TestWaitAllPodVolumesProcessed(t *testing.T) {
 
 		if c.expectedErr != "" {
 			assert.Equal(t, c.expectedErr, logHook.entry.Message)
+		} else {
+			assert.Nil(t, logHook.entry)
 		}
 
 		if c.expectedPVBPhase != "" {

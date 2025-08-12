@@ -56,6 +56,7 @@ import (
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 	"github.com/vmware-tanzu/velero/pkg/util/logging"
 	"github.com/vmware-tanzu/velero/pkg/util/results"
+	veleroutil "github.com/vmware-tanzu/velero/pkg/util/velero"
 )
 
 const (
@@ -86,6 +87,8 @@ type backupReconciler struct {
 	maxConcurrentK8SConnections int
 	defaultSnapshotMoveData     bool
 	globalCRClient              kbclient.Client
+	itemBlockWorkerCount        int
+	workerPool                  *pkgbackup.ItemBlockWorkerPool
 }
 
 func NewBackupReconciler(
@@ -110,6 +113,7 @@ func NewBackupReconciler(
 	credentialStore credentials.FileStore,
 	maxConcurrentK8SConnections int,
 	defaultSnapshotMoveData bool,
+	itemBlockWorkerCount int,
 	globalCRClient kbclient.Client,
 ) *backupReconciler {
 	b := &backupReconciler{
@@ -135,7 +139,9 @@ func NewBackupReconciler(
 		credentialFileStore:         credentialStore,
 		maxConcurrentK8SConnections: maxConcurrentK8SConnections,
 		defaultSnapshotMoveData:     defaultSnapshotMoveData,
+		itemBlockWorkerCount:        itemBlockWorkerCount,
 		globalCRClient:              globalCRClient,
+		workerPool:                  pkgbackup.StartItemBlockWorkerPool(ctx, itemBlockWorkerCount, logger),
 	}
 	b.updateTotalBackupMetric()
 	return b
@@ -144,6 +150,7 @@ func NewBackupReconciler(
 func (b *backupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&velerov1api.Backup{}).
+		Named(constant.ControllerBackup).
 		Complete(b)
 }
 
@@ -325,6 +332,8 @@ func (b *backupReconciler) prepareBackupRequest(backup *velerov1api.Backup, logg
 	request := &pkgbackup.Request{
 		Backup:           backup.DeepCopy(), // don't modify items in the cache
 		SkippedPVTracker: pkgbackup.NewSkipPVTracker(),
+		BackedUpItems:    pkgbackup.NewBackedUpItemsMap(),
+		ItemBlockChannel: b.workerPool.GetInputChannel(),
 	}
 	request.VolumesInformation.Init()
 
@@ -408,6 +417,13 @@ func (b *backupReconciler) prepareBackupRequest(backup *velerov1api.Backup, logg
 		if request.StorageLocation.Spec.AccessMode == velerov1api.BackupStorageLocationAccessModeReadOnly {
 			request.Status.ValidationErrors = append(request.Status.ValidationErrors,
 				fmt.Sprintf("backup can't be created because backup storage location %s is currently in read-only mode", request.StorageLocation.Name))
+		}
+
+		if !veleroutil.BSLIsAvailable(*request.StorageLocation) {
+			request.Status.ValidationErrors = append(
+				request.Status.ValidationErrors,
+				fmt.Sprintf("backup can't be created because BackupStorageLocation %s is in Unavailable status. please create a new backup after the BSL becomes available", request.StorageLocation.Name),
+			)
 		}
 	}
 

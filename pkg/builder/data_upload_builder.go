@@ -150,3 +150,21 @@ func (d *DataUploadBuilder) Node(node string) *DataUploadBuilder {
 	d.object.Status.Node = node
 	return d
 }
+
+// NodeOS sets the DataUpload's Node OS.
+func (d *DataUploadBuilder) NodeOS(nodeOS velerov2alpha1api.NodeOS) *DataUploadBuilder {
+	d.object.Status.NodeOS = nodeOS
+	return d
+}
+
+// AcceptedByNode sets the DataUpload's AcceptedByNode.
+func (d *DataUploadBuilder) AcceptedByNode(node string) *DataUploadBuilder {
+	d.object.Status.AcceptedByNode = node
+	return d
+}
+
+// AcceptedTimestamp sets the DataUpload's AcceptedTimestamp.
+func (d *DataUploadBuilder) AcceptedTimestamp(acceptedTimestamp *metav1.Time) *DataUploadBuilder {
+	d.object.Status.AcceptedTimestamp = acceptedTimestamp
+	return d
+}

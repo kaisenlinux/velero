@@ -176,7 +176,11 @@ type kubernetesResource struct {
 	preferredGVR          schema.GroupVersionResource
 	namespace, name, path string
 	orderedResource       bool
-	inItemBlock           bool // set to true during backup processing when added to an ItemBlock
+	// set to true during backup processing when added to an ItemBlock
+	// or if the item is excluded from backup.
+	inItemBlockOrExcluded bool
+	// Kind is added to facilitate creating an itemKey for progress tracking
+	kind string
 }
 
 // getItemsFromResourceIdentifiers get the kubernetesResources
@@ -405,6 +409,7 @@ func (r *itemCollector) getResourceItems(
 				namespace:     resourceID.Namespace,
 				name:          resourceID.Name,
 				path:          path,
+				kind:          resource.Kind,
 			})
 		}
 
@@ -478,6 +483,7 @@ func (r *itemCollector) getResourceItems(
 				namespace:     item.GetNamespace(),
 				name:          item.GetName(),
 				path:          path,
+				kind:          resource.Kind,
 			})
 
 			if item.GetNamespace() != "" {
@@ -804,6 +810,7 @@ func (r *itemCollector) collectNamespaces(
 			preferredGVR:  preferredGVR,
 			name:          unstructuredList.Items[index].GetName(),
 			path:          path,
+			kind:          resource.Kind,
 		})
 	}
 

@@ -46,14 +46,14 @@ type Action struct {
 	// Type defined specific type of action, currently only support 'skip'
 	Type VolumeActionType `yaml:"type"`
 	// Parameters defined map of parameters when executing a specific action
-	Parameters map[string]interface{} `yaml:"parameters,omitempty"`
+	Parameters map[string]any `yaml:"parameters,omitempty"`
 }
 
 // volumePolicy defined policy to conditions to match Volumes and related action to handle matched Volumes
 type VolumePolicy struct {
 	// Conditions defined list of conditions to match Volumes
-	Conditions map[string]interface{} `yaml:"conditions"`
-	Action     Action                 `yaml:"action"`
+	Conditions map[string]any `yaml:"conditions"`
+	Action     Action         `yaml:"action"`
 }
 
 // resourcePolicies currently defined slice of volume policies to handle backup
@@ -76,6 +76,16 @@ func unmarshalResourcePolicies(yamlData *string) (*ResourcePolicies, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode yaml data into resource policies  %v", err)
 	}
+
+	for _, vp := range resPolicies.VolumePolicies {
+		if raw, ok := vp.Conditions["pvcLabels"]; ok {
+			switch raw.(type) {
+			case map[string]any, map[string]string:
+			default:
+				return nil, fmt.Errorf("pvcLabels must be a map of string to string, got %T", raw)
+			}
+		}
+	}
 	return resPolicies, nil
 }
 
@@ -96,6 +106,9 @@ func (p *Policies) BuildPolicy(resPolicies *ResourcePolicies) error {
 		volP.conditions = append(volP.conditions, &nfsCondition{nfs: con.NFS})
 		volP.conditions = append(volP.conditions, &csiCondition{csi: con.CSI})
 		volP.conditions = append(volP.conditions, &volumeTypeCondition{volumeTypes: con.VolumeTypes})
+		if len(con.PVCLabels) > 0 {
+			volP.conditions = append(volP.conditions, &pvcLabelsCondition{labels: con.PVCLabels})
+		}
 		p.volumePolicies = append(p.volumePolicies, volP)
 	}
 
@@ -122,16 +135,28 @@ func (p *Policies) match(res *structuredVolume) *Action {
 	return nil
 }
 
-func (p *Policies) GetMatchAction(res interface{}) (*Action, error) {
+func (p *Policies) GetMatchAction(res any) (*Action, error) {
+	data, ok := res.(VolumeFilterData)
+	if !ok {
+		return nil, errors.New("failed to convert input to VolumeFilterData")
+	}
+
 	volume := &structuredVolume{}
-	switch obj := res.(type) {
-	case *v1.PersistentVolume:
-		volume.parsePV(obj)
-	case *v1.Volume:
-		volume.parsePodVolume(obj)
+	switch {
+	case data.PersistentVolume != nil:
+		volume.parsePV(data.PersistentVolume)
+		if data.PVC != nil {
+			volume.parsePVC(data.PVC)
+		}
+	case data.PodVolume != nil:
+		volume.parsePodVolume(data.PodVolume)
+		if data.PVC != nil {
+			volume.parsePVC(data.PVC)
+		}
 	default:
 		return nil, errors.New("failed to convert object")
 	}
+
 	return p.match(volume), nil
 }
 

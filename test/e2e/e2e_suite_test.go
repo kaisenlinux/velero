@@ -55,6 +55,7 @@ import (
 
 func init() {
 	test.VeleroCfg.Options = install.Options{}
+	test.VeleroCfg.BackupRepoConfigMap = test.BackupRepositoryConfigName // Set to the default value
 	flag.StringVar(
 		&test.VeleroCfg.CloudProvider,
 		"cloud-provider",
@@ -342,6 +343,18 @@ func init() {
 		"has-vsphere-plugin",
 		false,
 		"a switch for installing vSphere plugin.",
+	)
+	flag.IntVar(
+		&test.VeleroCfg.ItemBlockWorkerCount,
+		"item-block-worker-count",
+		1,
+		"Velero backup's item block worker count.",
+	)
+	flag.StringVar(
+		&test.VeleroCfg.ImageRegistryProxy,
+		"image-registry-proxy",
+		"",
+		"The image registry proxy, e.g. when the DockerHub access limitation is reached, can use available proxy to replace. Default is nil.",
 	)
 }
 
@@ -686,6 +699,8 @@ func TestE2e(t *testing.T) {
 		fmt.Println(err)
 		t.FailNow()
 	}
+
+	veleroutil.UpdateImagesMatrixByProxy(test.VeleroCfg.ImageRegistryProxy)
 
 	RegisterFailHandler(Fail)
 	testSuitePassed = RunSpecs(t, "E2e Suite")

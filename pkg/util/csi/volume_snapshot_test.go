@@ -304,6 +304,14 @@ func TestEnsureDeleteVS(t *testing.T) {
 		},
 	}
 
+	vsObjWithFinalizer := &snapshotv1api.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "fake-vs",
+			Namespace:  "fake-ns",
+			Finalizers: []string{"fake-finalizer-1", "fake-finalizer-2"},
+		},
+	}
+
 	tests := []struct {
 		name      string
 		clientObj []runtime.Object
@@ -335,6 +343,38 @@ func TestEnsureDeleteVS(t *testing.T) {
 			err: "error to assure VolumeSnapshot is deleted, fake-vs: error to get VolumeSnapshot fake-vs: fake-get-error",
 		},
 		{
+			name:      "wait timeout",
+			vsName:    "fake-vs",
+			namespace: "fake-ns",
+			clientObj: []runtime.Object{vsObjWithFinalizer},
+			reactors: []reactor{
+				{
+					verb:     "delete",
+					resource: "volumesnapshots",
+					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
+						return true, nil, nil
+					},
+				},
+			},
+			err: "timeout to assure VolumeSnapshot fake-vs is deleted, finalizers in VS [fake-finalizer-1 fake-finalizer-2]",
+		},
+		{
+			name:      "wait timeout, no finalizer",
+			vsName:    "fake-vs",
+			namespace: "fake-ns",
+			clientObj: []runtime.Object{vsObj},
+			reactors: []reactor{
+				{
+					verb:     "delete",
+					resource: "volumesnapshots",
+					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
+						return true, nil, nil
+					},
+				},
+			},
+			err: "timeout to assure VolumeSnapshot fake-vs is deleted, finalizers in VS []",
+		},
+		{
 			name:      "success",
 			vsName:    "fake-vs",
 			namespace: "fake-ns",
@@ -364,6 +404,13 @@ func TestEnsureDeleteVSC(t *testing.T) {
 	vscObj := &snapshotv1api.VolumeSnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "fake-vsc",
+		},
+	}
+
+	vscObjWithFinalizer := &snapshotv1api.VolumeSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "fake-vsc",
+			Finalizers: []string{"fake-finalizer-1", "fake-finalizer-2"},
 		},
 	}
 
@@ -407,6 +454,36 @@ func TestEnsureDeleteVSC(t *testing.T) {
 				},
 			},
 			err: "error to assure VolumeSnapshotContent is deleted, fake-vsc: error to get VolumeSnapshotContent fake-vsc: fake-get-error",
+		},
+		{
+			name:      "wait timeout",
+			vscName:   "fake-vsc",
+			clientObj: []runtime.Object{vscObjWithFinalizer},
+			reactors: []reactor{
+				{
+					verb:     "delete",
+					resource: "volumesnapshotcontents",
+					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
+						return true, nil, nil
+					},
+				},
+			},
+			err: "timeout to assure VolumeSnapshotContent fake-vsc is deleted, finalizers in VSC [fake-finalizer-1 fake-finalizer-2]",
+		},
+		{
+			name:      "wait timeout, no finalizer",
+			vscName:   "fake-vsc",
+			clientObj: []runtime.Object{vscObj},
+			reactors: []reactor{
+				{
+					verb:     "delete",
+					resource: "volumesnapshotcontents",
+					reactorFunc: func(action clientTesting.Action) (handled bool, ret runtime.Object, err error) {
+						return true, nil, nil
+					},
+				},
+			},
+			err: "timeout to assure VolumeSnapshotContent fake-vsc is deleted, finalizers in VSC []",
 		},
 		{
 			name:      "success",
@@ -1302,12 +1379,14 @@ func TestSetVolumeSnapshotContentDeletionPolicy(t *testing.T) {
 	testCases := []struct {
 		name         string
 		inputVSCName string
+		policy       snapshotv1api.DeletionPolicy
 		objs         []runtime.Object
 		expectError  bool
 	}{
 		{
 			name:         "should update DeletionPolicy of a VSC from retain to delete",
 			inputVSCName: "retainVSC",
+			policy:       snapshotv1api.VolumeSnapshotContentDelete,
 			objs: []runtime.Object{
 				&snapshotv1api.VolumeSnapshotContent{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1323,6 +1402,7 @@ func TestSetVolumeSnapshotContentDeletionPolicy(t *testing.T) {
 		{
 			name:         "should be a no-op updating if DeletionPolicy of a VSC is already Delete",
 			inputVSCName: "deleteVSC",
+			policy:       snapshotv1api.VolumeSnapshotContentDelete,
 			objs: []runtime.Object{
 				&snapshotv1api.VolumeSnapshotContent{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1338,6 +1418,7 @@ func TestSetVolumeSnapshotContentDeletionPolicy(t *testing.T) {
 		{
 			name:         "should update DeletionPolicy of a VSC with no DeletionPolicy",
 			inputVSCName: "nothingVSC",
+			policy:       snapshotv1api.VolumeSnapshotContentDelete,
 			objs: []runtime.Object{
 				&snapshotv1api.VolumeSnapshotContent{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1359,7 +1440,7 @@ func TestSetVolumeSnapshotContentDeletionPolicy(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeClient := velerotest.NewFakeControllerRuntimeClient(t, tc.objs...)
-			err := SetVolumeSnapshotContentDeletionPolicy(tc.inputVSCName, fakeClient)
+			err := SetVolumeSnapshotContentDeletionPolicy(tc.inputVSCName, fakeClient, tc.policy)
 			if tc.expectError {
 				assert.Error(t, err)
 			} else {
@@ -1373,7 +1454,7 @@ func TestSetVolumeSnapshotContentDeletionPolicy(t *testing.T) {
 				assert.NoError(t, err)
 				assert.Equal(
 					t,
-					snapshotv1api.VolumeSnapshotContentDelete,
+					tc.policy,
 					actual.Spec.DeletionPolicy,
 				)
 			}
@@ -1383,11 +1464,10 @@ func TestSetVolumeSnapshotContentDeletionPolicy(t *testing.T) {
 
 func TestDeleteVolumeSnapshots(t *testing.T) {
 	tests := []struct {
-		name        string
-		vs          snapshotv1api.VolumeSnapshot
-		vsc         snapshotv1api.VolumeSnapshotContent
-		expectedVS  snapshotv1api.VolumeSnapshot
-		expectedVSC snapshotv1api.VolumeSnapshotContent
+		name         string
+		vs           snapshotv1api.VolumeSnapshot
+		vsc          snapshotv1api.VolumeSnapshotContent
+		keepVSAndVSC bool
 	}{
 		{
 			name: "VS is ReadyToUse, and VS has corresponding VSC. VS should be deleted.",
@@ -1397,10 +1477,6 @@ func TestDeleteVolumeSnapshots(t *testing.T) {
 			vsc: *builder.ForVolumeSnapshotContent("vsc1").
 				DeletionPolicy(snapshotv1api.VolumeSnapshotContentDelete).
 				Status(&snapshotv1api.VolumeSnapshotContentStatus{}).Result(),
-			expectedVS: snapshotv1api.VolumeSnapshot{},
-			expectedVSC: *builder.ForVolumeSnapshotContent("vsc1").
-				DeletionPolicy(snapshotv1api.VolumeSnapshotContentRetain).
-				VolumeSnapshotRef("ns-", "name-").Result(),
 		},
 		{
 			name: "VS status is nil. VSC should not be modified.",
@@ -1409,9 +1485,7 @@ func TestDeleteVolumeSnapshots(t *testing.T) {
 			vsc: *builder.ForVolumeSnapshotContent("vsc1").
 				DeletionPolicy(snapshotv1api.VolumeSnapshotContentDelete).
 				Status(&snapshotv1api.VolumeSnapshotContentStatus{}).Result(),
-			expectedVS: snapshotv1api.VolumeSnapshot{},
-			expectedVSC: *builder.ForVolumeSnapshotContent("vsc1").
-				DeletionPolicy(snapshotv1api.VolumeSnapshotContentDelete).Result(),
+			keepVSAndVSC: true,
 		},
 	}
 
@@ -1422,10 +1496,8 @@ func TestDeleteVolumeSnapshots(t *testing.T) {
 				[]runtime.Object{&tc.vs, &tc.vsc}...,
 			)
 			logger := logging.DefaultLogger(logrus.DebugLevel, logging.FormatText)
-			backup := builder.ForBackup(velerov1api.DefaultNamespace, "backup-1").
-				DefaultVolumesToFsBackup(false).Result()
 
-			DeleteVolumeSnapshot(tc.vs, tc.vsc, backup, client, logger)
+			DeleteReadyVolumeSnapshot(tc.vs, tc.vsc, client, logger)
 
 			vsList := new(snapshotv1api.VolumeSnapshotList)
 			err := client.List(
@@ -1436,12 +1508,6 @@ func TestDeleteVolumeSnapshots(t *testing.T) {
 				},
 			)
 			require.NoError(t, err)
-			if tc.expectedVS.Name == "" {
-				require.Empty(t, vsList.Items)
-			} else {
-				require.Equal(t, tc.expectedVS.Status, vsList.Items[0].Status)
-				require.Equal(t, tc.expectedVS.Spec, vsList.Items[0].Spec)
-			}
 
 			vscList := new(snapshotv1api.VolumeSnapshotContentList)
 			err = client.List(
@@ -1449,8 +1515,14 @@ func TestDeleteVolumeSnapshots(t *testing.T) {
 				vscList,
 			)
 			require.NoError(t, err)
-			require.Len(t, vscList.Items, 1)
-			require.Equal(t, tc.expectedVSC.Spec, vscList.Items[0].Spec)
+
+			if tc.keepVSAndVSC {
+				require.Equal(t, crclient.ObjectKeyFromObject(&tc.vs), crclient.ObjectKeyFromObject(&vsList.Items[0]))
+				require.Equal(t, crclient.ObjectKeyFromObject(&tc.vsc), crclient.ObjectKeyFromObject(&vscList.Items[0]))
+			} else {
+				require.Empty(t, vsList.Items)
+				require.Empty(t, vscList.Items)
+			}
 		})
 	}
 }
@@ -1607,28 +1679,28 @@ func TestWaitUntilVSCHandleIsReady(t *testing.T) {
 			},
 		},
 		{
-			name:        "waitDisabled should not find volumesnapshotcontent volumesnapshot status is nil",
+			name:        "waitDisabled should not find volumesnapshotcontent when volumesnapshot status is nil",
 			wait:        false,
 			expectError: false,
 			exepctedVSC: nil,
 			volSnap:     vsWithNilStatus,
 		},
 		{
-			name:        "waitDisabled should not find volumesnapshotcontent volumesnapshot status.BoundVolumeSnapshotContentName is nil",
+			name:        "waitDisabled should not find volumesnapshotcontent when volumesnapshot status.BoundVolumeSnapshotContentName is nil",
 			wait:        false,
 			expectError: false,
 			exepctedVSC: nil,
 			volSnap:     vsWithNilStatusField,
 		},
 		{
-			name:        "waitDisabled should find volumesnapshotcontent volumesnapshotcontent status is nil",
+			name:        "waitDisabled should find volumesnapshotcontent when volumesnapshotcontent status is nil",
 			wait:        false,
 			expectError: false,
 			exepctedVSC: vscWithNilStatus,
 			volSnap:     vsForNilStatusVsc,
 		},
 		{
-			name:        "waitDisabled should find volumesnapshotcontent volumesnapshotcontent status.SnapshotHandle is nil",
+			name:        "waitDisabled should find volumesnapshotcontent when volumesnapshotcontent status.SnapshotHandle is nil",
 			wait:        false,
 			expectError: false,
 			exepctedVSC: vscWithNilStatusField,

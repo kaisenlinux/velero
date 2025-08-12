@@ -49,13 +49,7 @@ const (
 
 const (
 	FieldValueIsUnknown string = "unknown"
-	kopia               string = "kopia"
 	veleroDatamover     string = "velero"
-
-	//TODO reuse these constants from csi-plugin-for-velero after it's merged into the same repo
-
-	CSIDriverNameAnnotation        = "velero.io/csi-driver-name"
-	VolumeSnapshotHandleAnnotation = "velero.io/csi-volumesnapshot-handle"
 )
 
 type BackupVolumeInfo struct {
@@ -647,7 +641,7 @@ func (v *BackupVolumesInformation) generateVolumeInfoFromDataUpload() {
 				},
 				SnapshotDataMovementInfo: &SnapshotDataMovementInfo{
 					DataMover:    dataMover,
-					UploaderType: kopia,
+					UploaderType: velerov1api.BackupRepositoryTypeKopia,
 					OperationID:  operation.Spec.OperationID,
 					Phase:        dataUpload.Status.Phase,
 				},
@@ -836,7 +830,7 @@ func (t *RestoreVolumeInfoTracker) Result() []*RestoreVolumeInfo {
 			continue
 		}
 		pvcNS, pvcName := n[0], n[1]
-		var restoreSize int64 = 0
+		var restoreSize int64
 		if csiSnapshot.Status != nil && csiSnapshot.Status.RestoreSize != nil {
 			restoreSize = csiSnapshot.Status.RestoreSize.Value()
 		}
@@ -844,15 +838,16 @@ func (t *RestoreVolumeInfoTracker) Result() []*RestoreVolumeInfo {
 		if csiSnapshot.Spec.Source.VolumeSnapshotContentName != nil {
 			vscName = *csiSnapshot.Spec.Source.VolumeSnapshotContentName
 		}
+
 		volumeInfo := &RestoreVolumeInfo{
 			PVCNamespace:      pvcNS,
 			PVCName:           pvcName,
 			SnapshotDataMoved: false,
 			RestoreMethod:     CSISnapshot,
 			CSISnapshotInfo: &CSISnapshotInfo{
-				SnapshotHandle: csiSnapshot.Annotations[VolumeSnapshotHandleAnnotation],
+				SnapshotHandle: csiSnapshot.Annotations[velerov1api.VolumeSnapshotHandleAnnotation],
 				Size:           restoreSize,
-				Driver:         csiSnapshot.Annotations[CSIDriverNameAnnotation],
+				Driver:         csiSnapshot.Annotations[velerov1api.DriverNameAnnotation],
 				VSCName:        vscName,
 			},
 		}
@@ -889,7 +884,7 @@ func (t *RestoreVolumeInfoTracker) Result() []*RestoreVolumeInfo {
 			RestoreMethod: CSISnapshot,
 			SnapshotDataMovementInfo: &SnapshotDataMovementInfo{
 				DataMover:      dataMover,
-				UploaderType:   kopia,
+				UploaderType:   velerov1api.BackupRepositoryTypeKopia,
 				SnapshotHandle: dd.Spec.SnapshotID,
 				OperationID:    operationID,
 			},
